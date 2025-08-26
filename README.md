@@ -1,6 +1,12 @@
 # Rabbit Hole — Phishing-Simulation Tracker & Emailer
 
-A small Flask web app that lets you:
+**Rabbit Hole** is an **open-source phishing simulation and awareness platform** built for **beginners** in cybersecurity.  
+It helps users learn how phishing works, how attackers track user interactions, and how organizations can build awareness.  
+
+⚠️ **Disclaimer**: Rabbit Hole is designed for **educational and research purposes only**.  
+Please use it responsibly, only in **legal environments** (labs, awareness training, or with proper permissions).
+
+## Features
 
 - Import or create users and generate unique tracking links  
 - Compose and **send emails in bulk** with a custom per-message delay  
@@ -234,7 +240,25 @@ Choose a license appropriate for your organization (e.g., MIT) or keep proprieta
 
 ---
 
+## Contributing
+
+Contributions are welcome!
+- Fork this repo
+- Create a new branch (feature-xyz)
+- Commit and push your changes
+- Open a Pull Request 🚀
+
+---
+
 ## Credits
 
 Built for internal phishing simulations and awareness campaigns.  
 **“Rabbit Hole”** name courtesy of you 🐇🕳️.
+
+---
+## Author
+
+Rabbit Hole was developed and open-sourced by:
+
+Cybefox (Yuvraj Todankar)
+📧 cyberoninsider@gmail.com
