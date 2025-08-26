@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Generate Tracking Link</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">PhishTracker</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                    <li class="nav-item"><a class="nav-link" href="/generate">Generate</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/users">Users</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/report">Report</a></li>
+                    <li class="nav-item"><a class="nav-link" href="/import">Import</a></li>
+                    <li class="nav-item"><a class="nav-link active" href="/email-template">Email Template</a></li>
+                    <li class="nav-item"><a class="nav-link text-danger" href="/logout">Logout</a></li>
+                </ul>
+                <button class="btn btn-sm btn-outline-warning" onclick="resetAnalytics()">⟳ Reset Analytics</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <h1>🔗 Generate Tracking Link</h1>
+        <form method="POST">
+            <label for="user">Enter Username:</label>
+            <input type="text" name="user" id="user" required>
+            <button type="submit">Generate</button>
+        </form>
+
+        {% if error %}
+        <p class="error">{{ error }}</p>
+        {% endif %}
+
+        {% if user and token and link %}
+        <div class="result">
+            <p><strong>User:</strong> {{ user }}</p>
+            <p><strong>Token:</strong> {{ token }}</p>
+            <p><strong>Tracking Link:</strong><br><a href="{{ link }}" target="_blank">{{ link }}</a></p>
+        </div>
+        {% endif %}
+
+        <p><a href="/">← Back to Home</a></p>
+    </div>
+</body>
+
+</html>

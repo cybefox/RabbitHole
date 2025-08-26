@@ -1,0 +1,209 @@
+<script>
+  let filterGroup = '';
+  let filterClick = '';
+
+  function showLoader() {
+    document.getElementById("loader").style.display = "block";
+  }
+
+  function hideLoader() {
+    document.getElementById("loader").style.display = "none";
+  }
+
+  async function fetchDashboard() {
+    showLoader();
+
+    const res = await fetch('/api/clicks');
+    const data = await res.json();
+    const allClicks = data.clicks;
+
+    const tbody = document.querySelector('#clickTable tbody');
+    let html = '';
+
+    let groups = new Set();
+    let clickedTokens = new Set(allClicks.map(c => c.token));
+
+    let clickCount = 0;
+    let nonClickCount = 0;
+    let sentCount = 0;
+    let pendingCount = 0;
+    let groupMap = {};
+
+    const allUsers = await fetch('/users.csv').then(r => r.text()).then(parseCSV);
+
+    allUsers.forEach(user => {
+      groups.add(user.group);
+      const isClicked = clickedTokens.has(user.token);
+      const clickData = isClicked ? allClicks.find(c => c.token === user.token) : null;
+      const clickTs = clickData?.timestamp || '';
+      const ip = clickData?.ip || '';
+
+      const isSent = user.sent_count && parseInt(user.sent_count) > 0;
+      if (isSent) sentCount++;
+      else pendingCount++;
+
+      if (!groupMap[user.group]) groupMap[user.group] = { clicked: 0, total: 0 };
+      groupMap[user.group].total++;
+      if (isClicked) groupMap[user.group].clicked++;
+
+      const groupMatch = filterGroup ? user.group === filterGroup : true;
+      const clickMatch = !filterClick || (filterClick === 'clicked' && isClicked) || (filterClick === 'not_clicked' && !isClicked);
+
+      if (groupMatch && clickMatch) {
+        html += `
+          <tr>
+            <td>${user.first_name}</td>
+            <td>${user.last_name}</td>
+            <td>${user.email}</td>
+            <td>${user.group}</td>
+            <td>${user.token}</td>
+            <td>${clickTs}</td>
+            <td>${ip}</td>
+          </tr>`;
+      }
+
+      if (isClicked) clickCount++; else nonClickCount++;
+    });
+
+    tbody.innerHTML = html;
+    updateCharts(clickCount, nonClickCount, groupMap, sentCount, pendingCount);
+    populateGroupFilter([...groups]);
+
+    $('#clickTable').DataTable().destroy();
+    $('#clickTable').DataTable({
+      "pageLength": 50,
+      "ordering": true,
+      "deferRender": true,
+      "scrollY": 400,
+      "scrollCollapse": true
+    });
+
+    hideLoader();
+  }
+
+  async function fetchRepeatedClicks() {
+    const res = await fetch('/api/repeats');
+    const data = await res.json();
+    const table = document.querySelector('#repeatTable tbody');
+    let html = '';
+
+    data.repeats.forEach(u => {
+      html += `
+        <tr>
+          <td>${u.first_name} ${u.last_name}</td>
+          <td>${u.email}</td>
+          <td>${u.group}</td>
+          <td>${u.clicks}</td>
+          <td>${u.first_click}</td>
+          <td>${u.last_click}</td>
+          <td>${u.ip_list.join(', ')}</td>
+        </tr>`;
+    });
+
+    table.innerHTML = html;
+  }
+
+  async function fetchRepeatedEmails() {
+    const res = await fetch('/api/repeat-emails');
+    const data = await res.json();
+    const table = document.querySelector('#repeatEmailTable tbody');
+    let html = '';
+
+    data.emails.forEach(u => {
+      html += `
+        <tr>
+          <td>${u.first_name} ${u.last_name}</td>
+          <td>${u.email}</td>
+          <td>${u.group}</td>
+          <td>${u.total}</td>
+          <td>${u.first_time}</td>
+          <td>${u.last_time}</td>
+        </tr>`;
+    });
+
+    table.innerHTML = html;
+  }
+
+  function parseCSV(text) {
+    const [head, ...rows] = text.trim().split('\n');
+    const keys = head.split(',');
+    return rows.map(row => {
+      const values = row.split(',');
+      return Object.fromEntries(keys.map((k, i) => [k.trim(), values[i]?.trim()]));
+    });
+  }
+
+  function populateGroupFilter(groups) {
+    const dropdown = document.getElementById('groupFilter');
+    dropdown.innerHTML = '<option value="">All Groups</option>';
+    groups.forEach(g => {
+      dropdown.innerHTML += `<option value="${g}">${g}</option>`;
+    });
+  }
+
+  function updateCharts(clicks, noClicks, groupMap, sentCount, pendingCount) {
+    new Chart(document.getElementById('clickPieChart'), {
+      type: 'pie',
+      data: {
+        labels: ['Clicked', 'Not Clicked'],
+        datasets: [{ data: [clicks, noClicks], backgroundColor: ['#28a745', '#dc3545'] }]
+      }
+    });
+
+    const groups = Object.keys(groupMap);
+    const groupClicks = groups.map(g => groupMap[g].clicked);
+
+    new Chart(document.getElementById('clickBarChart'), {
+      type: 'bar',
+      data: {
+        labels: groups,
+        datasets: [{
+          label: 'Clicks per Group',
+          data: groupClicks,
+          backgroundColor: '#007bff'
+        }]
+      }
+    });
+
+    new Chart(document.getElementById('emailPieChart'), {
+      type: 'pie',
+      data: {
+        labels: ['Sent', 'Pending'],
+        datasets: [{
+          data: [sentCount, pendingCount],
+          backgroundColor: ['#198754', '#ffc107']
+        }]
+      }
+    });
+  }
+
+  document.getElementById('groupFilter').onchange = (e) => {
+    filterGroup = e.target.value;
+    fetchDashboard();
+  };
+
+  document.getElementById('clickFilter').onchange = (e) => {
+    filterClick = e.target.value;
+    fetchDashboard();
+  };
+
+  function resetAnalytics() {
+    if (confirm("Are you sure you want to reset all analytics? This cannot be undone.")) {
+      fetch('/reset-analytics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+        .then(r => r.json())
+        .then(data => {
+          alert("✅ Analytics reset!");
+          location.reload();
+        });
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    await fetchDashboard();
+    await fetchRepeatedClicks();
+    await fetchRepeatedEmails();
+  });
+</script>

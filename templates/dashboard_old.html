@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Phishing Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Click Tracking Dashboard</h1>
+        {% if records %}
+        <table>
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Timestamp (UTC)</th>
+                    <th>IP Address</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in records %}
+                <tr>
+                    <td>{{ row[0] }}</td>
+                    <td>{{ row[1] }}</td>
+                    <td>{{ row[2] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p>No click data available yet.</p>
+        {% endif %}
+        <p><a href="/">← Back to Home</a></p>
+    </div>
+</body>
+</html>

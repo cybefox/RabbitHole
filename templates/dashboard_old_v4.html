@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css" />
+</head>
+
+<body>
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/">PhishTracker</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <li class="nav-item"><a class="nav-link" href="/generate">Generate</a></li>
+          <li class="nav-item"><a class="nav-link" href="/users">Users</a></li>
+          <li class="nav-item"><a class="nav-link active" href="/dashboard">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="/report">Report</a></li>
+          <li class="nav-item"><a class="nav-link" href="/import">Import</a></li>
+          <li class="nav-item"><a class="nav-link" href="/email-template">Email Template</a></li>
+          <li class="nav-item"><a class="nav-link text-danger" href="/logout">Logout</a></li>
+        </ul>
+        <button class="btn btn-sm btn-outline-warning" onclick="resetAnalytics()">⟳ Reset Analytics</button>
+      </div>
+    </div>
+  </nav>
+  <div class="p5">
+    <div class="row mb-4">
+      <div class="col-md-3">
+        <div class="alert alert-primary">📧 Total Users: <strong>{{ stats.total_users }}</strong></div>
+      </div>
+      <div class="col-md-3">
+        <div class="alert alert-info">📤 Emails Sent: <strong>{{ stats.emails_sent }}</strong></div>
+      </div>
+      <div class="col-md-3">
+        <div class="alert alert-success">📬 Emails Opened: <strong>{{ stats.emails_opened }}</strong></div>
+      </div>
+      <div class="col-md-3">
+        <div class="alert alert-warning">🔗 Links Clicked: <strong>{{ stats.links_clicked }}</strong></div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="row mb-4">
+      <div class="col-md-3">
+        <label>Filter by Group:</label>
+        <select class="form-select" id="groupFilter">
+          <option value="">All Groups</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label>Click Status:</label>
+        <select class="form-select" id="clickFilter">
+          <option value="">All</option>
+          <option value="clicked">Clicked</option>
+          <option value="not_clicked">Not Clicked</option>
+        </select>
+      </div>
+    </div>
+    <!-- Chart Section -->
+    <div class="row mb-5">
+      <div class="col-md-6">
+        <h5>Clicks vs No Clicks</h5>
+        <canvas id="clickPieChart" style="max-height: 300px; max-width: 100%;"></canvas>
+      </div>
+      <div class="col-md-6">
+        <h5>Clicks by Group</h5>
+        <canvas id="clickBarChart" style="max-height: 300px; max-width: 100%;"></canvas>
+      </div>
+    </div>
+    <div class="row mb-5">
+      <div class="col-md-6">
+        <h5>Email Sent vs Pending</h5>
+        <canvas id="emailPieChart" style="max-height: 300px;"></canvas>
+      </div>
+    </div>
+    <!-- Table -->
+    <table class="table table-striped" id="clickTable">
+      <thead class="table-dark">
+        <tr>
+          <th>First</th>
+          <th>Last</th>
+          <th>Email</th>
+          <th>Group</th>
+          <th>Token</th>
+          <th>Time</th>
+          <th>IP</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h4 class="mt-5">Repeated Clicks</h4>
+    <table class="table table-bordered table-sm" id="repeatTable">
+      <thead class="table-warning">
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Group</th>
+          <th>Total Clicks</th>
+          <th>First Click</th>
+          <th>Last Click</th>
+          <th>IPs</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <h4 class="mt-5">Repeated Emails</h4>
+    <table class="table table-bordered table-sm" id="repeatEmailTable">
+      <thead class="table-info">
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Group</th>
+          <th>Total Sent</th>
+          <th>First Sent</th>
+          <th>Last Sent</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+  </div>
+  <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+    let filterGroup = '';
+    let filterClick = '';
+    let clickPieChart, clickBarChart, emailPieChart;
+
+
+    function showLoader() {
+      document.getElementById("loader").style.display = "block";
+    }
+
+    function hideLoader() {
+      document.getElementById("loader").style.display = "none";
+    }
+
+    async function fetchDashboard() {
+      showLoader();
+
+      const res = await fetch('/api/clicks');
+      const data = await res.json();
+      const allClicks = data.clicks;
+
+      const tbody = document.querySelector('#clickTable tbody');
+      let html = '';
+
+      let groups = new Set();
+      let clickedTokens = new Set(allClicks.map(c => c.token));
+
+      let clickCount = 0;
+      let nonClickCount = 0;
+      let sentCount = 0;
+      let pendingCount = 0;
+      let groupMap = {};
+
+      const allUsers = await fetch('/users.csv').then(r => r.text()).then(parseCSV);
+
+      allUsers.forEach(user => {
+        groups.add(user.group);
+        const isClicked = clickedTokens.has(user.token);
+        const clickData = isClicked ? allClicks.find(c => c.token === user.token) : null;
+        const clickTs = clickData?.timestamp || '';
+        const ip = clickData?.ip || '';
+
+        const isSent = user.sent_count && parseInt(user.sent_count) > 0;
+        if (isSent) sentCount++;
+        else pendingCount++;
+
+        if (!groupMap[user.group]) groupMap[user.group] = { clicked: 0, total: 0 };
+        groupMap[user.group].total++;
+        if (isClicked) groupMap[user.group].clicked++;
+
+        const groupMatch = filterGroup ? user.group === filterGroup : true;
+        const clickMatch = !filterClick || (filterClick === 'clicked' && isClicked) || (filterClick === 'not_clicked' && !isClicked);
+
+        if (groupMatch && clickMatch) {
+          html += `
+          <tr>
+            <td>${user.first_name}</td>
+            <td>${user.last_name}</td>
+            <td>${user.email}</td>
+            <td>${user.group}</td>
+            <td>${user.token}</td>
+            <td>${clickTs}</td>
+            <td>${ip}</td>
+          </tr>`;
+        }
+
+        if (isClicked) clickCount++; else nonClickCount++;
+      });
+
+      tbody.innerHTML = html;
+      updateCharts(clickCount, nonClickCount, groupMap, sentCount, pendingCount);
+      populateGroupFilter([...groups]);
+
+      $('#clickTable').DataTable().destroy();
+      $('#clickTable').DataTable({
+        "pageLength": 50,
+        "ordering": true,
+        "deferRender": true,
+        "scrollY": 400,
+        "scrollCollapse": true
+      });
+
+      hideLoader();
+    }
+
+    async function fetchRepeatedClicks() {
+      const res = await fetch('/api/repeats');
+      const data = await res.json();
+      const table = document.querySelector('#repeatTable tbody');
+      let html = '';
+
+      data.repeats.forEach(u => {
+        html += `
+        <tr>
+          <td>${u.first_name} ${u.last_name}</td>
+          <td>${u.email}</td>
+          <td>${u.group}</td>
+          <td>${u.clicks}</td>
+          <td>${u.first_click}</td>
+          <td>${u.last_click}</td>
+          <td>${u.ip_list.join(', ')}</td>
+        </tr>`;
+      });
+
+      table.innerHTML = html;
+    }
+
+    async function fetchRepeatedEmails() {
+      const res = await fetch('/api/repeat-emails');
+      const data = await res.json();
+      const table = document.querySelector('#repeatEmailTable tbody');
+      let html = '';
+
+      data.emails.forEach(u => {
+        html += `
+        <tr>
+          <td>${u.first_name} ${u.last_name}</td>
+          <td>${u.email}</td>
+          <td>${u.group}</td>
+          <td>${u.total}</td>
+          <td>${u.first_time}</td>
+          <td>${u.last_time}</td>
+        </tr>`;
+      });
+
+      table.innerHTML = html;
+    }
+
+    function parseCSV(text) {
+      const [head, ...rows] = text.trim().split('\n');
+      const keys = head.split(',');
+      return rows.map(row => {
+        const values = row.split(',');
+        return Object.fromEntries(keys.map((k, i) => [k.trim(), values[i]?.trim()]));
+      });
+    }
+
+    function populateGroupFilter(groups) {
+      const dropdown = document.getElementById('groupFilter');
+      dropdown.innerHTML = '<option value="">All Groups</option>';
+      groups.forEach(g => {
+        dropdown.innerHTML += `<option value="${g}">${g}</option>`;
+      });
+    }
+
+    function updateCharts(clicks, noClicks, groupMap, sentCount, pendingCount) {
+      if (clickPieChart) clickPieChart.destroy();
+      if (clickBarChart) clickBarChart.destroy();
+      if (emailPieChart) emailPieChart.destroy();
+
+      clickPieChart = new Chart(document.getElementById('clickPieChart'), {
+        type: 'pie',
+        data: {
+          labels: ['Clicked', 'Not Clicked'],
+          datasets: [{ data: [clicks, noClicks], backgroundColor: ['#28a745', '#dc3545'] }]
+        }
+      });
+
+      const groups = Object.keys(groupMap);
+      const groupClicks = groups.map(g => groupMap[g].clicked);
+
+      clickBarChart = new Chart(document.getElementById('clickBarChart'), {
+        type: 'bar',
+        data: {
+          labels: groups,
+          datasets: [{
+            label: 'Clicks per Group',
+            data: groupClicks,
+            backgroundColor: '#007bff'
+          }]
+        }
+      });
+
+      emailPieChart = new Chart(document.getElementById('emailPieChart'), {
+        type: 'pie',
+        data: {
+          labels: ['Sent', 'Pending'],
+          datasets: [{
+            data: [sentCount, pendingCount],
+            backgroundColor: ['#198754', '#ffc107']
+          }]
+        }
+      });
+    }
+
+
+    document.getElementById('groupFilter').onchange = (e) => {
+      filterGroup = e.target.value;
+      fetchDashboard();
+    };
+
+    document.getElementById('clickFilter').onchange = (e) => {
+      filterClick = e.target.value;
+      fetchDashboard();
+    };
+
+    function resetAnalytics() {
+      if (confirm("Are you sure you want to reset all analytics? This cannot be undone.")) {
+        fetch('/reset-analytics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        })
+          .then(r => r.json())
+          .then(data => {
+            alert("✅ Analytics reset!");
+            location.reload();
+          });
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      await fetchDashboard();
+      await fetchRepeatedClicks();
+      await fetchRepeatedEmails();
+    });
+  </script>
+
+  <!-- Loader spinner (add in body where appropriate) -->
+  <div id="loader" style="display:none; text-align:center; margin-top:20px;">
+    <div class="spinner-border text-primary" role="status">
+      <span class="visually-hidden">Loading...</span>
+    </div>
+  </div>
+
+</body>
+
+</html>

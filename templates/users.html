@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>All Tracked Users</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<h2>All Tracked Users</h2>
+<table border="1">
+    <tr>
+        <th>Username</th>
+        <th>Full Name</th>
+        <th>Email</th>
+        <th>Group</th>
+        <th>Token</th>
+        <th>Link</th>
+    </tr>
+    {% for u in users %}
+    <tr>
+        <td>{{ u.username }}</td>
+        <td>{{ u.first_name }} {{ u.last_name }}</td>
+        <td>{{ u.email }}</td>
+        <td>{{ u.group }}</td>
+        <td>{{ u.token }}</td>
+        <td>
+		<input type="text" value="{{ u.link }}" id="link-{{ loop.index }}" readonly style="width: 90%;">
+    		<button onclick="copyToClipboard('link-{{ loop.index }}')">📋 Copy</button>
+	</td>
+    </tr>
+    {% endfor %}
+</table>
+<script>
+function copyToClipboard(id) {
+    const input = document.getElementById(id);
+    input.select();
+    input.setSelectionRange(0, 99999); // For mobile devices
+    document.execCommand("copy");
+    alert("Copied: " + input.value);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bulk Import</title>
+</head>
+<body>
+    <h2>Import Users (CSV)</h2>
+    <form action="/import" method="POST" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required>
+        <br><br>
+        <button type="submit">Upload and Generate Links</button>
+    </form>
+    {% if message %}
+    <p>{{ message }}</p>
+    {% endif %}
+    <p><a href="/dashboard">Back to Dashboard</a></p>
+</body>
+</html>

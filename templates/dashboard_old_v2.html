@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Click Tracker Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<h2>Click Tracker Dashboard</h2>
+<table border="1">
+    <tr>
+        <th>Token</th>
+        <th>Timestamp</th>
+        <th>IP Address</th>
+    </tr>
+    {% for row in clicks %}
+    <tr>
+        <td>{{ row[0] }}</td>
+        <td>{{ row[1] }}</td>
+        <td>{{ row[2] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+</body>
+</html>
