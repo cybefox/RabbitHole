@@ -234,12 +234,6 @@ Supported placeholders inside **Email Template (HTML)**:
 
 ---
 
-## License
-
-Choose a license appropriate for your organization (e.g., MIT) or keep proprietary.
-
----
-
 ## Contributing
 
 Contributions are welcome!
@@ -262,3 +256,21 @@ Rabbit Hole was developed and open-sourced by:
 
 Cybefox (Yuvraj Todankar)
 📧 cyberoninsider@gmail.com
+
+---
+
+## Disclaimer
+
+Rabbit Hole is created for:
+- Cybersecurity students
+- Awareness trainers
+- Researchers
+
+🚫 Do not use on real users, networks, or organizations without explicit permission.
+The author is not responsible for misuse.
+
+---
+
+## License
+
+This project is licensed under the **MIT License** — free to use, modify, and distribute.
