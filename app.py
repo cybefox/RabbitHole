@@ -459,11 +459,16 @@ def email_template():
         for u in users:
             if u['username'] in selected_usernames:
                 link_url = f"https://track.example.org/hit?uid={u['token']}"
+                pixel_url = f"https://track.example.org/img/{u['token']}.png"
+                pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
                 body = template_text.replace("{{first_name}}", u['first_name']) \
                                     .replace("{{last_name}}", u['last_name']) \
                                     .replace("{{email}}", u['email']) \
                                     .replace("{{token}}", u['token']) \
-                                    .replace("{{link}}", f'<a href="{link_url}">Click here</a>')
+                                    .replace("{{link}}", f'<a href="{link_url}">Click here</a>') \
+                                    .replace("{{pixel}}", pixel_tag)
+                if pixel_url not in body:
+                    body += pixel_tag
                 generated.append({
                     'email': u['email'],
                     'body': body
@@ -502,11 +507,17 @@ def send_emails():
     for user in users_to_send:
         to_email = user['email']
         link_url = user['link']
+        pixel_url = f"https://track.example.org/img/{user['token']}.png"
+        pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
         body = template.replace("{{first_name}}", user['first_name']) \
                        .replace("{{last_name}}", user['last_name']) \
                        .replace("{{email}}", user['email']) \
                        .replace("{{token}}", user['token']) \
-                       .replace("{{link}}", f'<a href="{link_url}">CHECK AND VERIFY SALARY SLIP</a>')
+                       .replace("{{link}}", f'<a href="{link_url}">CHECK AND VERIFY SALARY SLIP</a>') \
+                       .replace("{{pixel}}", pixel_tag)
+        # Auto-inject pixel if not already present via placeholder
+        if pixel_url not in body:
+            body += pixel_tag
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = "[Update] New Salary Format - Update Details"
