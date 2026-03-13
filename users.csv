@@ -1,1 +1,2 @@
 username,first_name,last_name,email,group,token,link
+admin,test,test,test@gmail.com,test,aad7fc28-c7e6-403d-adfe-0584c4c54860,https://track.example.com/hit?uid=aad7fc28-c7e6-403d-adfe-0584c4c54860
