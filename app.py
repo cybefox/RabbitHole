@@ -22,6 +22,10 @@ SMTP_PORT = 587
 SMTP_USER = 'rl'
 SMTP_PASS = 'R'
 
+# Tracking configuration — change these to your deployed domain
+TRACKING_BASE_URL = 'https://track.example.org'   # base URL of this server
+REDIRECT_URL = 'https://intranet.example.com/thank-you'  # where users land after clicking
+
 
 def login_required(f):
     @wraps(f)
@@ -69,7 +73,7 @@ def generate_link(user):
     if existing:
         return existing['token'], existing['link']
     token = str(uuid.uuid4())
-    link = f"https://track.example.org/hit?uid={token}"
+    link = f"{TRACKING_BASE_URL}/hit?uid={token}"
     row = [
         user['username'], user['first_name'], user['last_name'],
         user['email'], user['group'], token, link,
@@ -148,17 +152,17 @@ def generate():
                     existing['email'] == email):
                 token = existing['token']
                 link = existing['link']
-                pixel_url = f"https://track.example.org/img/{token}.png" if existing.get('track_open') == 'yes' else None
+                pixel_url = f"{TRACKING_BASE_URL}/img/{token}.png" if existing.get('track_open') == 'yes' else None
                 return render_template('generate.html', user=existing, token=token, link=link,
                                        pixel_url=pixel_url,
                                        message="✅ User already exists. Showing existing tracking link.")
 
         token = str(uuid.uuid4())
-        link = f"https://track.example.org/hit?uid={token}"
+        link = f"{TRACKING_BASE_URL}/hit?uid={token}"
         row = [username, first, last, email, group, token, link, track_open]
         save_user(row)
 
-        pixel_url = f"https://track.example.org/img/{token}.png" if track_open == 'yes' else None
+        pixel_url = f"{TRACKING_BASE_URL}/img/{token}.png" if track_open == 'yes' else None
         return render_template('generate.html', user=user, token=token, link=link,
                                pixel_url=pixel_url,
                                message="✅ New tracking link generated.")
@@ -191,7 +195,7 @@ def hit():
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     with open(CLICK_FILE, 'a', newline='') as f:
         csv.writer(f).writerow([token, ts, ip])
-    return redirect("https://intranet.example.com/thank-you")
+    return redirect(REDIRECT_URL)
 
 
 @app.route('/img/<uid>.png')
@@ -485,8 +489,8 @@ def email_template():
     if request.method == 'POST' and request.form.get('action') == 'generate':
         for u in users:
             if u['username'] in selected_usernames:
-                link_url = f"https://track.example.org/hit?uid={u['token']}"
-                pixel_url = f"https://track.example.org/img/{u['token']}.png"
+                link_url = f"{TRACKING_BASE_URL}/hit?uid={u['token']}"
+                pixel_url = f"{TRACKING_BASE_URL}/img/{u['token']}.png"
                 pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
                 track_open = u.get('track_open') == 'yes'
                 body = template_text.replace("{{first_name}}", u['first_name']) \
@@ -533,7 +537,7 @@ def send_emails():
         to_email = user['email']
         link_url = user['link']
         track_open = user.get('track_open') == 'yes'
-        pixel_url = f"https://track.example.org/img/{user['token']}.png"
+        pixel_url = f"{TRACKING_BASE_URL}/img/{user['token']}.png"
         pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
 
         body = template.replace("{{first_name}}", user['first_name']) \
