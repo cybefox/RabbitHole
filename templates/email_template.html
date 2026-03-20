@@ -1,225 +1,198 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Email Template - RabbitHole</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
-  <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-</head>
+{% extends "base.html" %}
+{% block title %}Email Template{% endblock %}
 
-<body class="p-4">
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+{% endblock %}
 
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="/">RabbitHole</a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div class="collapse navbar-collapse" id="navbarNav">
-        <ul class="navbar-nav me-auto">
-          <li class="nav-item"><a class="nav-link" href="/generate">Generate</a></li>
-          <li class="nav-item"><a class="nav-link" href="/users">Users</a></li>
-          <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
-          <li class="nav-item"><a class="nav-link" href="/report">Report</a></li>
-          <li class="nav-item"><a class="nav-link" href="/import">Import</a></li>
-          <li class="nav-item"><a class="nav-link active" href="/email-template">Email Template</a></li>
-          <li class="nav-item"><a class="nav-link text-danger" href="/logout">Logout</a></li>
-        </ul>
-        <button class="btn btn-sm btn-outline-warning" onclick="resetAnalytics()">⟳ Reset Analytics</button>
-      </div>
-    </div>
-  </nav>
+{% block nav_actions %}
+<button class="btn btn-outline btn-sm" onclick="resetAnalytics()">↺ Reset Analytics</button>
+{% endblock %}
 
-  <h4>Email Template</h4>
+{% block body %}
+<div class="page">
 
-  <!-- GROUP SELECTION -->
-  <form method="POST" id="groupForm">
-    <div class="mb-3">
-      <label for="group">Select Group:</label>
-      <select name="group" onchange="this.form.submit()" class="form-select" style="max-width:300px;">
-        <option disabled selected>Select Group</option>
-        {% for g in groups %}
-        <option value="{{ g }}" {% if g==selected_group %}selected{% endif %}>{{ g }}</option>
-        {% endfor %}
-      </select>
-    </div>
-  </form>
-
-  {% if users %}
-  <!-- MAIN FORM -->
-  <form method="POST" action="/send-emails">
-    <input type="hidden" name="group" value="{{ selected_group }}">
-
-    <div class="d-flex gap-3 align-items-center mb-2">
-      <div class="form-check">
-        <input type="checkbox" class="form-check-input" id="selectAllCheckbox">
-        <label class="form-check-label" for="selectAllCheckbox">Select All</label>
-      </div>
-      <div>
-        <label for="emailStatusFilter" class="me-1">Filter:</label>
-        <select id="emailStatusFilter" class="form-select form-select-sm d-inline-block" style="width:auto;">
-          <option value="">All</option>
-          <option value="sent">Sent</option>
-          <option value="pending">Pending</option>
-        </select>
-      </div>
-    </div>
-
-    <table id="userTable" class="display table table-bordered table-sm">
-      <thead class="table-dark">
-        <tr>
-          <th>Select</th>
-          <th>First Name</th>
-          <th>Last Name</th>
-          <th>Email</th>
-          <th>Pixel Tracking</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for u in users %}
-        <tr data-status="{{ 'sent' if u.sent_count|int > 0 else 'pending' }}">
-          <td><input type="checkbox" class="form-check-input" name="usernames" value="{{ u.username }}"></td>
-          <td>{{ u.first_name }}</td>
-          <td>{{ u.last_name }}</td>
-          <td>{{ u.email }}</td>
-          <td>
-            {% if u.get('track_open') == 'yes' %}
-              <span class="badge bg-success">Enabled</span>
-            {% else %}
-              <span class="badge bg-secondary">Disabled</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-
-    <!-- Saved Templates -->
-    {% if saved_templates %}
-    <div class="mb-3">
-      <label class="form-label">Load Saved Template:</label>
-      <div class="input-group" style="max-width:500px;">
-        <select id="savedTemplateSelect" class="form-select">
-          <option value="">— select a template —</option>
-          {% for name, content in saved_templates.items() %}
-          <option value="{{ name }}" data-content="{{ content | e }}">{{ name }}</option>
-          {% endfor %}
-        </select>
-        <button type="button" class="btn btn-outline-primary" onclick="loadTemplate()">Load</button>
-        <button type="button" class="btn btn-outline-danger" onclick="deleteTemplate()">Delete</button>
-      </div>
-    </div>
-    {% endif %}
-
-    <h5 class="mt-3">Email Template (HTML)</h5>
-    <div class="mb-1 text-muted small">
-      Placeholders: <code>{{first_name}}</code> <code>{{last_name}}</code> <code>{{email}}</code>
-      <code>{{token}}</code> <code>{{link}}</code> <code>{{pixel}}</code>
-      <span class="text-info">({{pixel}} auto-injects only for users with pixel tracking enabled)</span>
-    </div>
-    <textarea name="template" id="templateTextarea" class="form-control" rows="8">{{ template_text or "<p>Hello {{first_name}},<br>Click here: {{link}}</p>" }}</textarea>
-
-    <!-- Save Template -->
-    <div class="input-group mt-2 mb-3" style="max-width:500px;">
-      <input type="text" id="saveTemplateName" class="form-control" placeholder="Template name to save…">
-      <button type="button" class="btn btn-outline-secondary" onclick="saveTemplate()">Save Template</button>
-    </div>
-
-    <div class="mb-3">
-      <label>Delay between emails (seconds):</label>
-      <input type="number" name="delay" class="form-control" value="3" style="max-width:120px;">
-    </div>
-
-    <div class="d-flex gap-3">
-      <button type="submit" name="action" value="generate" formaction="/email-template" class="btn btn-primary">
-        📋 Generate Emails
-      </button>
-      <button type="submit" name="action" value="send" formaction="/send-emails" class="btn btn-success">
-        📨 Send Emails to Selected Users
-      </button>
-    </div>
-  </form>
-  {% endif %}
-
-  {% if generated %}
-  <hr>
-  <h5>Generated Emails:</h5>
-  {% for g in generated %}
-  <div class="border p-2 mb-3 bg-light">
-    <strong>{{ g.email }}</strong>
-    <textarea class="form-control" rows="6">{{ g.body }}</textarea>
+  <div class="page-header">
+    <h1>Email Template</h1>
+    <p>Compose, preview, and send phishing simulation emails</p>
   </div>
-  {% endfor %}
-  {% endif %}
 
-  <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    function resetAnalytics() {
-      if (confirm("Reset all analytics?")) {
-        fetch('/reset-analytics', { method: 'POST' })
-          .then(res => res.json())
-          .then(() => { alert("✅ Analytics reset!"); location.reload(); });
-      }
-    }
+  <div class="grid-2" style="align-items:start;gap:1.5rem;">
 
-    function saveTemplate() {
-      const name = document.getElementById('saveTemplateName').value.trim();
-      const content = document.getElementById('templateTextarea').value;
-      if (!name) { alert('Enter a template name.'); return; }
-      const fd = new FormData();
-      fd.append('template_name', name);
-      fd.append('template_content', content);
-      fetch('/save-template', { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(() => { alert('✅ Template saved!'); location.reload(); });
-    }
+    <!-- Left: controls -->
+    <div>
+      <!-- Group selector -->
+      <div class="card mb-4">
+        <div class="card-title">1 — Select Group</div>
+        <form method="POST" id="groupForm">
+          <select name="group" class="form-select" onchange="this.form.submit()">
+            <option disabled {% if not selected_group %}selected{% endif %}>Select a group…</option>
+            {% for g in groups %}
+            <option value="{{ g }}" {% if g == selected_group %}selected{% endif %}>{{ g }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      </div>
 
-    function loadTemplate() {
-      const sel = document.getElementById('savedTemplateSelect');
-      const opt = sel.options[sel.selectedIndex];
-      if (!opt.value) return;
-      document.getElementById('templateTextarea').value = opt.getAttribute('data-content');
-    }
+      {% if users %}
+      <!-- User table -->
+      <div class="card mb-4">
+        <div class="card-title mb-3">2 — Select Recipients</div>
+        <form method="POST" id="sendForm" action="/send-emails">
+          <input type="hidden" name="group" value="{{ selected_group }}">
 
-    function deleteTemplate() {
-      const sel = document.getElementById('savedTemplateSelect');
-      const name = sel.value;
-      if (!name || !confirm(`Delete template "${name}"?`)) return;
-      const fd = new FormData();
-      fd.append('template_name', name);
-      fetch('/delete-template', { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(() => { alert('🗑 Template deleted.'); location.reload(); });
-    }
+          <div class="flex-between mb-3">
+            <label class="form-check">
+              <input type="checkbox" class="form-check-input" id="selectAll">
+              <span class="form-check-label text-sm">Select All</span>
+            </label>
+            <select id="statusFilter" class="form-select" style="width:auto;min-width:120px;">
+              <option value="">All</option>
+              <option value="sent">Sent</option>
+              <option value="pending">Pending</option>
+            </select>
+          </div>
 
-    $(document).ready(function () {
-      const table = $('#userTable').DataTable({
-        pageLength: 50,
-        lengthMenu: [10, 25, 50, 100, 200],
-        scrollY: "400px",
-        scrollCollapse: true,
-        paging: true,
-        ordering: true,
-        deferRender: true
-      });
+          <div class="table-wrap" style="border-radius:10px;overflow:hidden;">
+            <table class="rh-table" id="userTable">
+              <thead>
+                <tr><th></th><th>Name</th><th>Email</th><th>Pixel</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {% for u in users %}
+                <tr data-status="{{ 'sent' if u.sent_count|int > 0 else 'pending' }}">
+                  <td style="width:36px;"><input type="checkbox" class="form-check-input" name="usernames" value="{{ u.username }}"></td>
+                  <td>{{ u.first_name }} {{ u.last_name }}</td>
+                  <td class="text-sm">{{ u.email }}</td>
+                  <td>
+                    {% if u.track_open == 'yes' %}
+                      <span class="badge badge-success">On</span>
+                    {% else %}
+                      <span class="badge badge-muted">Off</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if u.sent_count|int > 0 %}
+                      <span class="badge badge-accent">Sent ×{{ u.sent_count }}</span>
+                    {% else %}
+                      <span class="badge badge-muted">Pending</span>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
 
-      $('#selectAllCheckbox').on('change', function () {
-        const checked = this.checked;
-        $('#userTable tbody input[type="checkbox"]').each(function () {
-          if ($(this).closest('tr').is(':visible')) this.checked = checked;
-        });
-      });
+          <!-- Template editor -->
+          <div class="divider"></div>
+          <div class="card-title mb-2">3 — Write Template</div>
 
-      $.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
-        const selected = $('#emailStatusFilter').val();
-        const row = table.row(dataIndex).node();
-        const status = $(row).attr('data-status');
-        return !selected || status === selected;
-      });
+          {% if saved_templates %}
+          <div class="input-row mb-3">
+            <select id="savedTemplateSelect" class="form-select">
+              <option value="">— load saved template —</option>
+              {% for name, content in saved_templates.items() %}
+              <option value="{{ name }}" data-content="{{ content | e }}">{{ name }}</option>
+              {% endfor %}
+            </select>
+            <button type="button" class="btn btn-outline btn-sm" onclick="loadTemplate()">Load</button>
+            <button type="button" class="btn btn-danger btn-sm" onclick="deleteTemplate()">Del</button>
+          </div>
+          {% endif %}
 
-      $('#emailStatusFilter').on('change', function () { table.draw(); });
+          <p class="form-hint mb-2">Placeholders: <code>{{first_name}}</code> <code>{{last_name}}</code> <code>{{email}}</code> <code>{{link}}</code> <code>{{pixel}}</code></p>
+          <textarea name="template" id="templateArea" class="form-control" rows="9" style="font-family:monospace;font-size:.82rem;">{{ template_text or "<p>Hello {{first_name}},\n\nPlease review your details: {{link}}</p>" }}</textarea>
+
+          <div class="input-row mt-3">
+            <input type="text" id="saveName" class="form-control" placeholder="Template name…">
+            <button type="button" class="btn btn-outline btn-sm" onclick="saveTemplate()">Save</button>
+          </div>
+
+          <div class="form-group mt-4">
+            <label class="form-label">Delay Between Emails (seconds)</label>
+            <input type="number" name="delay" class="form-control" value="3" style="max-width:100px;">
+          </div>
+
+          <div class="flex gap-3 mt-4">
+            <button type="submit" name="action" value="generate" formaction="/email-template" class="btn btn-outline">Preview</button>
+            <button type="submit" name="action" value="send" formaction="/send-emails" class="btn btn-success">Send Emails</button>
+          </div>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Right: preview -->
+    <div>
+      {% if generated %}
+      <div class="card">
+        <div class="card-title">Preview — {{ generated | length }} email(s)</div>
+        {% for g in generated %}
+        <div style="margin-bottom:1.25rem;padding-bottom:1.25rem;border-bottom:1px solid var(--border);">
+          <p class="text-sm text-muted mb-2">→ <strong style="color:var(--text);">{{ g.email }}</strong></p>
+          <textarea class="form-control" rows="7" style="font-size:.8rem;font-family:monospace;">{{ g.body }}</textarea>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="card" style="border-style:dashed;text-align:center;padding:3rem 2rem;">
+        <div style="font-size:2rem;margin-bottom:.75rem;">📧</div>
+        <p class="text-muted text-sm">Select recipients and click <strong>Preview</strong> to see rendered emails here</p>
+      </div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+<script>
+function resetAnalytics() {
+  if (!confirm('Reset all analytics?')) return;
+  fetch('/reset-analytics', { method:'POST' }).then(r => r.json()).then(() => location.reload());
+}
+function saveTemplate() {
+  const name = document.getElementById('saveName').value.trim();
+  const content = document.getElementById('templateArea').value;
+  if (!name) { alert('Enter a template name.'); return; }
+  const fd = new FormData();
+  fd.append('template_name', name); fd.append('template_content', content);
+  fetch('/save-template', { method:'POST', body:fd }).then(r => r.json()).then(() => { alert('✅ Saved!'); location.reload(); });
+}
+function loadTemplate() {
+  const sel = document.getElementById('savedTemplateSelect');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt.value) return;
+  document.getElementById('templateArea').value = opt.getAttribute('data-content');
+}
+function deleteTemplate() {
+  const sel = document.getElementById('savedTemplateSelect');
+  const name = sel.value;
+  if (!name || !confirm(`Delete "${name}"?`)) return;
+  const fd = new FormData(); fd.append('template_name', name);
+  fetch('/delete-template', { method:'POST', body:fd }).then(r => r.json()).then(() => { alert('Deleted.'); location.reload(); });
+}
+
+$(document).ready(function() {
+  const table = $('#userTable').DataTable({ pageLength:50, ordering:true, scrollY:'320px', scrollCollapse:true, paging:true });
+
+  $('#selectAll').on('change', function() {
+    const checked = this.checked;
+    $('#userTable tbody input[type="checkbox"]').each(function() {
+      if ($(this).closest('tr').is(':visible')) this.checked = checked;
     });
-  </script>
-</body>
-</html>
+  });
+
+  $.fn.dataTable.ext.search.push(function(settings, data, dataIndex) {
+    const sel = $('#statusFilter').val();
+    const row = table.row(dataIndex).node();
+    const st  = $(row).attr('data-status');
+    return !sel || st === sel;
+  });
+  $('#statusFilter').on('change', function() { table.draw(); });
+});
+</script>
+{% endblock %}

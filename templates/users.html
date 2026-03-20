@@ -1,92 +1,75 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Users - RabbitHole</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
-    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-</head>
-<body class="p-0">
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
 
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
-    <div class="container-fluid">
-        <a class="navbar-brand" href="/">RabbitHole</a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-            <span class="navbar-toggler-icon"></span>
-        </button>
-        <div class="collapse navbar-collapse" id="navbarNav">
-            <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-                <li class="nav-item"><a class="nav-link" href="/generate">Generate</a></li>
-                <li class="nav-item"><a class="nav-link active" href="/users">Users</a></li>
-                <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
-                <li class="nav-item"><a class="nav-link" href="/report">Report</a></li>
-                <li class="nav-item"><a class="nav-link" href="/import">Import</a></li>
-                <li class="nav-item"><a class="nav-link" href="/email-template">Email Template</a></li>
-                <li class="nav-item"><a class="nav-link text-danger" href="/logout">Logout</a></li>
-            </ul>
-        </div>
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+{% endblock %}
+
+{% block nav_actions %}
+<a href="/users.csv" class="btn btn-outline btn-sm">⬇ Export CSV</a>
+{% endblock %}
+
+{% block body %}
+<div class="page">
+
+  <div class="page-header flex-between">
+    <div>
+      <h1>Users</h1>
+      <p>{{ users | length }} tracked users</p>
     </div>
-</nav>
+    <a href="/import" class="btn btn-primary btn-sm">+ Import</a>
+  </div>
 
-<div class="container-fluid px-4">
-    <h4 class="mb-3">All Tracked Users</h4>
-    <table id="usersTable" class="table table-bordered table-sm display">
-        <thead class="table-dark">
-            <tr>
-                <th>Username</th>
-                <th>Full Name</th>
-                <th>Email</th>
-                <th>Group</th>
-                <th>Pixel Tracking</th>
-                <th>Token</th>
-                <th>Link</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for u in users %}
-            <tr>
-                <td>{{ u.username }}</td>
-                <td>{{ u.first_name }} {{ u.last_name }}</td>
-                <td>{{ u.email }}</td>
-                <td>{{ u.group }}</td>
-                <td>
-                    {% if u.get('track_open') == 'yes' %}
-                        <span class="badge bg-success">Enabled</span>
-                    {% else %}
-                        <span class="badge bg-secondary">Disabled</span>
-                    {% endif %}
-                </td>
-                <td><code>{{ u.token }}</code></td>
-                <td>
-                    <div class="input-group input-group-sm">
-                        <input type="text" class="form-control" value="{{ u.link }}" id="link-{{ loop.index }}" readonly>
-                        <button class="btn btn-outline-secondary" onclick="copyLink('link-{{ loop.index }}')">Copy</button>
-                    </div>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
+  <div class="table-wrap">
+    <table class="rh-table" id="usersTable">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Full Name</th>
+          <th>Email</th>
+          <th>Group</th>
+          <th>Pixel</th>
+          <th>Link</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u.username }}</td>
+          <td>{{ u.first_name }} {{ u.last_name }}</td>
+          <td>{{ u.email }}</td>
+          <td>{% if u.group %}<span class="badge badge-accent">{{ u.group }}</span>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td>
+            {% if u.track_open == 'yes' %}
+              <span class="badge badge-success">Enabled</span>
+            {% else %}
+              <span class="badge badge-muted">Off</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="input-row">
+              <input type="text" class="form-control" style="font-size:.75rem;" value="{{ u.link }}" id="lnk-{{ loop.index }}" readonly>
+              <button class="btn btn-outline btn-sm" onclick="copy('lnk-{{ loop.index }}')">Copy</button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
     </table>
-</div>
+  </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</div>
+{% endblock %}
+
+{% block scripts %}
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script>
-    $(document).ready(function () {
-        $('#usersTable').DataTable({
-            pageLength: 50,
-            ordering: true,
-            scrollY: '60vh',
-            scrollCollapse: true
-        });
-    });
-
-    function copyLink(id) {
-        const input = document.getElementById(id);
-        input.select();
-        input.setSelectionRange(0, 99999);
-        document.execCommand("copy");
-    }
+$(document).ready(function() {
+  $('#usersTable').DataTable({ pageLength:50, ordering:true, scrollY:'60vh', scrollCollapse:true });
+});
+function copy(id) {
+  const el = document.getElementById(id);
+  navigator.clipboard.writeText(el.value).catch(() => { el.select(); document.execCommand('copy'); });
+}
 </script>
-</body>
-</html>
+{% endblock %}

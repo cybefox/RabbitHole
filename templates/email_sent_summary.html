@@ -1,26 +1,38 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Emails Sent</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="p-4">
-<h2>Emails Sent Summary</h2>
-{% if message %}
-  <h4>{{ message }}</h4>
-{% endif %}
+{% extends "base.html" %}
+{% block title %}Emails Sent{% endblock %}
 
-{% if sent %}
-  <h5>✅ Sent Emails:</h5>
-  <ul>
-    {% for email in sent %}
-      <li>{{ email }}</li>
-    {% endfor %}
-  </ul>
-  <p><strong>Total sent: {{ count }}</strong></p>
-{% endif %}
+{% block body %}
+<div class="page-md mt-6">
 
-<br>
-<a class="btn btn-secondary" href="/email-template">⬅ Back</a>
-</body>
-</html>
+  <div class="page-header">
+    <h1>Send Summary</h1>
+  </div>
+
+  {% if message %}
+  <div class="alert {{ 'alert-success' if '✅' in message else 'alert-danger' }}">{{ message }}</div>
+  {% endif %}
+
+  {% if sent %}
+  <div class="card mt-4">
+    <div class="card-title">Sent to {{ count }} recipient(s)</div>
+    <table class="rh-table">
+      <thead><tr><th>#</th><th>Email Address</th></tr></thead>
+      <tbody>
+        {% for email in sent %}
+        <tr>
+          <td class="text-muted text-sm">{{ loop.index }}</td>
+          <td>{{ email }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="flex gap-3 mt-5">
+    <a href="/email-template" class="btn btn-outline">← Back to Email</a>
+    <a href="/dashboard" class="btn btn-primary">View Dashboard</a>
+  </div>
+
+</div>
+{% endblock %}

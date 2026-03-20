@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}RabbitHole{% endblock %} — RabbitHole</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+<nav class="rh-nav">
+  <a class="brand" href="/">🐇 RabbitHole</a>
+  <div class="nav-links">
+    <a href="/dashboard"      class="{{ 'active' if request.path == '/dashboard' }}">Dashboard</a>
+    <a href="/generate"       class="{{ 'active' if request.path == '/generate' }}">Generate</a>
+    <a href="/import"         class="{{ 'active' if request.path == '/import' }}">Import</a>
+    <a href="/users"          class="{{ 'active' if request.path == '/users' }}">Users</a>
+    <a href="/report"         class="{{ 'active' if request.path == '/report' }}">Report</a>
+    <a href="/email-template" class="{{ 'active' if request.path == '/email-template' }}">Email</a>
+    <a href="/sent-status"    class="{{ 'active' if request.path == '/sent-status' }}">Sent Log</a>
+  </div>
+  <div class="nav-end">
+    {% block nav_actions %}{% endblock %}
+    <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
+  </div>
+</nav>
+
+{% block body %}{% endblock %}
+
+<script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
