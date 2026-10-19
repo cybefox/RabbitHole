@@ -1,6 +1,9 @@
-from flask import Flask, request, redirect, render_template, send_file, session, url_for, make_response, jsonify
-import csv, uuid, json, random
+from flask import Flask, request, redirect, render_template, send_file, session, url_for, make_response, jsonify, abort
+from werkzeug.security import generate_password_hash, check_password_hash
+import csv, uuid, json, random, threading, secrets
 from datetime import datetime, timezone
+from urllib.parse import quote
+from html import escape as html_escape
 import os, io, time
 from functools import wraps
 from contextlib import contextmanager
@@ -12,17 +15,26 @@ import psycopg2
 import psycopg2.extras
 
 app = Flask(__name__)
-app.secret_key = 'Cybefix@123'  # Change in production
+# Secrets/config come from the environment; the fallbacks keep local dev working
+# but SHOULD be overridden in any real deployment.
+app.secret_key = os.environ.get('RABBITHOLE_SECRET_KEY', 'dev-insecure-change-me')
 
-# ── SMTP config ───────────────────────────────────────────────────────────────
-SMTP_SERVER = 'smtp.hostinger.com'
-SMTP_PORT   = 587
-SMTP_USER   = 'rl'
-SMTP_PASS   = 'R'
+# ── Admin credentials ───────────────────────────────────────────────────────────
+# Bootstrap admin: used ONLY to seed the first account when the accounts table is
+# empty. Login authenticates against the hashed `accounts` table, not these values.
+# If no password is provided, a strong random one is generated and printed at first run.
+ADMIN_USER = os.environ.get('RABBITHOLE_ADMIN_USER', 'admin')
+ADMIN_PASS = os.environ.get('RABBITHOLE_ADMIN_PASS')  # None => generate at bootstrap
+
+# ── SMTP config (legacy fallback; real config lives in the smtp_configs table) ──
+SMTP_SERVER = os.environ.get('SMTP_SERVER', '')
+SMTP_PORT   = int(os.environ.get('SMTP_PORT', '587') or 587)
+SMTP_USER   = os.environ.get('SMTP_USER', '')
+SMTP_PASS   = os.environ.get('SMTP_PASS', '')
 
 # ── Tracking config ───────────────────────────────────────────────────────────
-TRACKING_BASE_URL = 'https://track.example.org'          # base URL of this server
-REDIRECT_URL      = 'https://intranet.example.com/thank-you'  # landing page after click
+TRACKING_BASE_URL = os.environ.get('TRACKING_BASE_URL', 'http://127.0.0.1:5001').rstrip('/')
+REDIRECT_URL      = os.environ.get('REDIRECT_URL', 'https://example.com/')
 
 # ── Database config ───────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get(
@@ -39,6 +51,10 @@ _TEMPLATES_FILE = "email_templates.json"
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
+
+def _utcnow():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
 
 @contextmanager
 def get_db():
@@ -98,7 +114,134 @@ def init_db():
                     content TEXT NOT NULL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS smtp_configs (
+                    id              SERIAL PRIMARY KEY,
+                    name            TEXT NOT NULL UNIQUE,
+                    server          TEXT NOT NULL,
+                    port            INTEGER NOT NULL DEFAULT 587,
+                    username        TEXT NOT NULL DEFAULT '',
+                    password        TEXT NOT NULL DEFAULT '',
+                    security        TEXT NOT NULL DEFAULT 'starttls',
+                    from_email      TEXT NOT NULL DEFAULT '',
+                    from_name       TEXT NOT NULL DEFAULT '',
+                    default_subject TEXT NOT NULL DEFAULT '',
+                    is_active       BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """)
+            # Campaign/template attribution — added idempotently so databases
+            # migrated before this feature pick up the column too.
+            cur.execute("ALTER TABLE clicks    ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE opens     ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE email_log ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id             SERIAL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    smtp_config_id INTEGER,
+                    smtp_name      TEXT NOT NULL DEFAULT '',
+                    subject        TEXT NOT NULL DEFAULT '',
+                    delay          INTEGER NOT NULL DEFAULT 3,
+                    total          INTEGER NOT NULL DEFAULT 0,
+                    sent           INTEGER NOT NULL DEFAULT 0,
+                    failed         INTEGER NOT NULL DEFAULT 0,
+                    status         TEXT NOT NULL DEFAULT 'running',
+                    stop_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_error     TEXT NOT NULL DEFAULT '',
+                    created_at     TEXT NOT NULL DEFAULT '',
+                    finished_at    TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS landing_page_id INTEGER")
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS landing_name TEXT NOT NULL DEFAULT ''")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS landing_pages (
+                    id         SERIAL PRIMARY KEY,
+                    name       TEXT NOT NULL UNIQUE,
+                    html       TEXT NOT NULL DEFAULT '',
+                    thankyou   TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS accounts (
+                    id            SERIAL PRIMARY KEY,
+                    username      TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role          TEXT NOT NULL DEFAULT 'viewer',
+                    active        BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at    TEXT NOT NULL DEFAULT '',
+                    last_login    TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS submissions (
+                    id         SERIAL PRIMARY KEY,
+                    token      TEXT NOT NULL DEFAULT '',
+                    campaign   TEXT NOT NULL DEFAULT '',
+                    landing_id INTEGER,
+                    name       TEXT NOT NULL DEFAULT '',
+                    email      TEXT NOT NULL DEFAULT '',
+                    ip         TEXT NOT NULL DEFAULT '',
+                    timestamp  TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            # Any campaigns left 'running' from a previous process are stale —
+            # a worker thread does not survive a restart, so mark them interrupted.
+            cur.execute("""
+                UPDATE campaigns SET status = 'interrupted', finished_at = %s
+                 WHERE status IN ('running', 'stopping')
+            """, (_utcnow(),))
+    _seed_smtp_config()
+    _seed_admin_account()
     _migrate_csv_to_db()
+
+
+def _seed_admin_account():
+    """If no operator accounts exist yet, bootstrap one admin so there is always a
+    way to log in and create the rest. The password comes from RABBITHOLE_ADMIN_PASS,
+    or — if unset — is randomly generated and printed once (no weak default)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM accounts")
+            if cur.fetchone()['cnt'] != 0:
+                return
+            generated = ADMIN_PASS is None
+            password  = ADMIN_PASS or secrets.token_urlsafe(12)
+            cur.execute("""
+                INSERT INTO accounts (username, password_hash, role, active, created_at)
+                VALUES (%s,%s,'admin',TRUE,%s)
+                ON CONFLICT (username) DO NOTHING
+            """, (ADMIN_USER, generate_password_hash(password), _utcnow()))
+    if generated:
+        print("\n" + "=" * 64)
+        print("  RabbitHole: bootstrapped admin account")
+        print(f"    username: {ADMIN_USER}")
+        print(f"    password: {password}")
+        print("  Log in and change this password now. It is shown only once.")
+        print("  (Set RABBITHOLE_ADMIN_PASS to choose your own instead.)")
+        print("=" * 64 + "\n")
+    else:
+        print(f"✅ Bootstrapped admin account '{ADMIN_USER}' from RABBITHOLE_ADMIN_PASS")
+
+
+def _seed_smtp_config():
+    """If no SMTP configs exist yet, seed one from the legacy module constants
+    so the app keeps working after upgrade. Harmless if constants are blank."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM smtp_configs")
+            if cur.fetchone()['cnt'] == 0 and SMTP_SERVER:
+                cur.execute("""
+                    INSERT INTO smtp_configs
+                        (name, server, port, username, password, security,
+                         from_email, from_name, default_subject, is_active)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                    ON CONFLICT (name) DO NOTHING
+                """, (
+                    'Default', SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASS,
+                    'starttls', SMTP_USER, 'RabbitHole', 'Phishing Awareness',
+                ))
 
 
 def _migrate_csv_to_db():
@@ -203,15 +346,50 @@ def _migrate_csv_to_db():
             print(f"⚠️  Could not migrate {_TEMPLATES_FILE}: {e}")
 
 
-# ── Auth decorator ────────────────────────────────────────────────────────────
+# ── Auth / roles ──────────────────────────────────────────────────────────────
+
+ROLE_RANK = {'viewer': 1, 'operator': 2, 'admin': 3}
+
+
+def _is_authenticated():
+    # 'role' is set at login; a session with 'logged_in' but no 'role' is a stale
+    # pre-upgrade session and must re-authenticate.
+    return 'logged_in' in session and 'role' in session
+
 
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
+        if not _is_authenticated():
+            session.clear()
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+def role_required(min_role):
+    """Gate a route on a minimum role (admin > operator > viewer)."""
+    needed = ROLE_RANK[min_role]
+
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not _is_authenticated():
+                session.clear()
+                return redirect(url_for('login'))
+            if ROLE_RANK.get(session.get('role'), 0) < needed:
+                if request.path.startswith('/api/'):
+                    return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+                return render_template('403.html'), 403
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+
+@app.context_processor
+def inject_current_user():
+    return {'current_user': {'username': session.get('user', ''),
+                             'role': session.get('role', '')}}
 
 
 # ── Utility functions ─────────────────────────────────────────────────────────
@@ -263,6 +441,19 @@ def generate_link(user):
     return token, link
 
 
+def tracking_urls(token, campaign='', landing_id=None):
+    """Build click and pixel URLs for a token, tagged with an optional campaign
+    label so simultaneous templates can be told apart in the logs. When a landing
+    page is set, the click URL carries &lp=<id> so /hit serves that page."""
+    suffix = f"&c={quote(campaign)}" if campaign else ""
+    if landing_id:
+        suffix += f"&lp={landing_id}"
+    link_url  = f"{TRACKING_BASE_URL}/hit?uid={token}{suffix}"
+    psuffix   = f"?c={quote(campaign)}" if campaign else ""
+    pixel_url = f"{TRACKING_BASE_URL}/img/{token}.png{psuffix}"
+    return link_url, pixel_url
+
+
 def load_templates():
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -270,13 +461,147 @@ def load_templates():
             return {r['name']: r['content'] for r in cur.fetchall()}
 
 
-def log_email_sent(username, email, timestamp):
+def log_email_sent(username, email, timestamp, campaign=''):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO email_log (username, email, timestamp) VALUES (%s,%s,%s)",
-                (username, email, timestamp)
+                "INSERT INTO email_log (username, email, timestamp, campaign) VALUES (%s,%s,%s,%s)",
+                (username, email, timestamp, campaign)
             )
+
+
+# ── SMTP config helpers ─────────────────────────────────────────────────────────
+
+def load_smtp_configs():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM smtp_configs ORDER BY name")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_smtp_config(config_id=None):
+    """Return the SMTP config to send with: an explicit id if given and valid,
+    otherwise the active one, otherwise None."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if config_id:
+                cur.execute("SELECT * FROM smtp_configs WHERE id = %s", (config_id,))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+            cur.execute("SELECT * FROM smtp_configs WHERE is_active = TRUE LIMIT 1")
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def smtp_connection(cfg):
+    """Open an SMTP connection honouring the config's security mode.
+    Caller is responsible for closing (use as a context manager)."""
+    security = (cfg.get('security') or 'starttls').lower()
+    server, port = cfg['server'], int(cfg['port'])
+
+    if security == 'ssl':
+        conn = smtplib.SMTP_SSL(server, port, timeout=30)
+        conn.ehlo()
+    else:
+        conn = smtplib.SMTP(server, port, timeout=30)
+        conn.ehlo()
+        if security == 'starttls':
+            conn.starttls()
+            conn.ehlo()
+
+    if cfg.get('username'):
+        conn.login(cfg['username'], cfg.get('password', ''))
+    return conn
+
+
+def smtp_from_header(cfg):
+    name  = cfg.get('from_name') or ''
+    email = cfg.get('from_email') or cfg.get('username') or ''
+    return f'{name} <{email}>' if name else email
+
+
+# ── Landing page helpers ────────────────────────────────────────────────────────
+
+DEFAULT_LANDING_HTML = """<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account Verification</title></head>
+<body style="font-family:Arial,sans-serif;background:#f3f4f6;margin:0;padding:40px;">
+  <div style="max-width:420px;margin:40px auto;background:#fff;border-radius:8px;
+              padding:32px;box-shadow:0 1px 4px rgba(0,0,0,.1);">
+    <h2 style="margin-top:0;">Please confirm your details</h2>
+    <p>Hello {{first_name}}, verify your information to continue.</p>
+    {{form}}
+  </div>
+</body>
+</html>"""
+
+
+def load_landing_pages():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM landing_pages ORDER BY name")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_landing_page(lp_id):
+    if not lp_id:
+        return None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM landing_pages WHERE id = %s", (lp_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def _landing_form_html(token, campaign, lp_id):
+    """The injected name/email capture form. Inline-styled so it renders inside
+    arbitrary admin HTML. Posts to /submit with hidden tracking fields."""
+    return f"""<form method="POST" action="/submit" style="margin-top:16px;">
+  <input type="hidden" name="token" value="{html_escape(token or '')}">
+  <input type="hidden" name="campaign" value="{html_escape(campaign or '')}">
+  <input type="hidden" name="lp" value="{html_escape(str(lp_id or ''))}">
+  <div style="margin-bottom:12px;">
+    <label style="display:block;margin-bottom:4px;">Full name</label>
+    <input type="text" name="name" required
+           style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <div style="margin-bottom:16px;">
+    <label style="display:block;margin-bottom:4px;">Email</label>
+    <input type="email" name="email" required
+           style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
+  </div>
+  <button type="submit"
+          style="width:100%;padding:11px;background:#2563eb;color:#fff;border:none;
+                 border-radius:4px;font-size:15px;cursor:pointer;">Continue</button>
+</form>"""
+
+
+def render_landing(lp, user, token, campaign):
+    """Produce the final standalone landing HTML. Uses plain string replacement
+    (never Jinja) on admin-authored HTML, with user values HTML-escaped."""
+    u = user or {}
+    html_out = lp.get('html') or DEFAULT_LANDING_HTML
+    html_out = (html_out
+                .replace("{{first_name}}", html_escape(u.get('first_name', '')))
+                .replace("{{last_name}}",  html_escape(u.get('last_name', '')))
+                .replace("{{email}}",      html_escape(u.get('email', '')))
+                .replace("{{form}}",       _landing_form_html(token, campaign, lp.get('id'))))
+    return html_out
+
+
+def get_user_by_token(token):
+    if not token:
+        return None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT username, first_name, last_name, email, grp AS "group", token
+                FROM users WHERE token = %s
+            """, (token,))
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -300,9 +625,23 @@ def login():
             return render_template('login.html', error="Incorrect security check.",
                                    captcha_question=_new_captcha())
 
-        if request.form.get('username') == 'admin' and request.form.get('password') == 'admin123':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM accounts WHERE username = %s AND active = TRUE",
+                            (username,))
+                acct = cur.fetchone()
+
+        if acct and check_password_hash(acct['password_hash'], password):
+            session.clear()
             session['logged_in'] = True
-            session.pop('captcha_answer', None)
+            session['user']      = acct['username']
+            session['role']      = acct['role']
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE accounts SET last_login = %s WHERE id = %s",
+                                (_utcnow(), acct['id']))
             return redirect(url_for('dashboard'))
 
         return render_template('login.html', error="Invalid credentials.",
@@ -313,7 +652,7 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect(url_for('login'))
 
 
@@ -327,7 +666,7 @@ def index():
 # ── Generate ──────────────────────────────────────────────────────────────────
 
 @app.route('/generate', methods=['GET', 'POST'])
-@login_required
+@role_required('operator')
 def generate():
     if request.method == 'POST':
         username   = request.form['username'].strip()
@@ -389,27 +728,78 @@ def serve_users_csv():
 
 @app.route('/hit')
 def hit():
-    token = request.args.get("uid")
+    token    = request.args.get("uid")
+    campaign = request.args.get("c", "")
+    lp_id    = request.args.get("lp")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if ',' in ip:
         ip = ip.split(',')[0].strip()
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    ts = _utcnow()
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO clicks (token, timestamp, ip) VALUES (%s,%s,%s)", (token, ts, ip))
+            cur.execute("INSERT INTO clicks (token, timestamp, ip, campaign) VALUES (%s,%s,%s,%s)",
+                        (token, ts, ip, campaign))
+
+    # If this link carries a landing page, serve it (with a capture form);
+    # otherwise fall back to the configured external redirect.
+    lp = get_landing_page(lp_id) if lp_id else None
+    if lp:
+        user = get_user_by_token(token)
+        resp = make_response(render_landing(lp, user, token, campaign))
+        resp.headers["Content-Type"] = "text/html; charset=utf-8"
+        return resp
     return redirect(REDIRECT_URL)
 
 
 @app.route('/img/<uid>.png')
 def img(uid):
+    campaign = request.args.get("c", "")
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if ',' in ip:
         ip = ip.split(',')[0].strip()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO opens (token, timestamp, ip) VALUES (%s,%s,%s)", (uid, ts, ip))
-    return send_file("static/pixel.png", mimetype='image/png')
+            cur.execute("INSERT INTO opens (token, timestamp, ip, campaign) VALUES (%s,%s,%s,%s)",
+                        (uid, ts, ip, campaign))
+    return send_file(os.path.join(app.root_path, "static", "pixel.png"), mimetype='image/png')
+
+
+@app.route('/submit', methods=['POST'])
+def submit():
+    """Public: records a data-entry submission from a landing page, then shows a
+    plain thank-you page. Confirms the target went past the click."""
+    token    = request.form.get("token", "")
+    campaign = request.form.get("campaign", "")
+    lp_id    = request.form.get("lp", "") or None
+    name     = request.form.get("name", "").strip()
+    email    = request.form.get("email", "").strip()
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    if ',' in ip:
+        ip = ip.split(',')[0].strip()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO submissions (token, campaign, landing_id, name, email, ip, timestamp)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (token, campaign, lp_id, name, email, ip, _utcnow()))
+
+    lp = get_landing_page(lp_id) if lp_id else None
+    message = (lp.get('thankyou') if lp and lp.get('thankyou')
+               else "Thank you. Your information has been received.")
+    page = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thank you</title></head>
+<body style="font-family:Arial,sans-serif;background:#f3f4f6;margin:0;padding:40px;">
+  <div style="max-width:420px;margin:60px auto;background:#fff;border-radius:8px;
+              padding:32px;box-shadow:0 1px 4px rgba(0,0,0,.1);text-align:center;">
+    {message}
+  </div>
+</body></html>"""
+    resp = make_response(page)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -453,7 +843,7 @@ def dashboard():
         'emails_opened': opens_count,
         'links_clicked': clicks_count,
     }
-    email_pending = len(all_users) - sent_count
+    email_pending = max(0, len(all_users) - sent_count)
 
     return render_template('dashboard.html', clicks=enriched_clicks, stats=stats,
                            email_sent=sent_count, email_pending=email_pending)
@@ -501,7 +891,209 @@ def api_repeats():
     return jsonify({'repeats': rows})
 
 
+@app.route('/api/campaigns')
+@login_required
+def api_campaigns():
+    """Per-campaign (per-template) breakdown so several templates running at
+    once can be compared side by side."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT campaign, COUNT(DISTINCT LOWER(email)) AS cnt
+                FROM email_log GROUP BY campaign
+            """)
+            sent = {r['campaign']: r['cnt'] for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT campaign, COUNT(DISTINCT token) AS cnt
+                FROM opens GROUP BY campaign
+            """)
+            opened = {r['campaign']: r['cnt'] for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT campaign,
+                       COUNT(DISTINCT token) AS unique_clicks,
+                       COUNT(*) AS total_clicks
+                FROM clicks GROUP BY campaign
+            """)
+            clicked = {r['campaign']: dict(r) for r in cur.fetchall()}
+
+    names = set(sent) | set(opened) | set(clicked)
+    rows = []
+    for name in names:
+        c = clicked.get(name, {})
+        s = sent.get(name, 0)
+        uc = c.get('unique_clicks', 0)
+        rows.append({
+            'campaign':      name or '(untagged)',
+            'sent':          s,
+            'opened':        opened.get(name, 0),
+            'unique_clicks': uc,
+            'total_clicks':  c.get('total_clicks', 0),
+            'click_rate':    round(uc * 100.0 / s, 1) if s else 0.0,
+        })
+    rows.sort(key=lambda r: (r['sent'], r['unique_clicks']), reverse=True)
+    return jsonify({'campaigns': rows})
+
+
+@app.route('/api/repeat-offenders')
+@login_required
+def api_repeat_offenders():
+    """Users who 'failed' (clicked the lure) in more than one distinct campaign —
+    the repeat offenders worth prioritising for awareness training."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.token,
+                       u.first_name, u.last_name, u.email, u.grp AS "group",
+                       COUNT(DISTINCT c.campaign) AS campaigns_failed,
+                       COUNT(*)                   AS total_clicks,
+                       STRING_AGG(DISTINCT c.campaign, ', ') AS campaigns,
+                       MIN(c.timestamp) AS first_click,
+                       MAX(c.timestamp) AS last_click,
+                       STRING_AGG(DISTINCT c.ip, ', ') AS ips
+                FROM clicks c
+                LEFT JOIN users u ON u.token = c.token
+                WHERE c.campaign <> ''
+                GROUP BY c.token, u.first_name, u.last_name, u.email, u.grp
+                HAVING COUNT(DISTINCT c.campaign) > 1
+                ORDER BY campaigns_failed DESC, total_clicks DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({'offenders': rows})
+
+
 # ── Report ────────────────────────────────────────────────────────────────────
+
+@app.route('/telemetry')
+@login_required
+def telemetry():
+    return render_template("telemetry.html")
+
+
+@app.route('/submissions')
+@login_required
+def submissions():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.name, s.email, s.campaign, s.ip, s.timestamp,
+                       u.grp AS "group"
+                FROM submissions s
+                LEFT JOIN users u ON u.token = s.token
+                ORDER BY s.timestamp DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    return render_template("submissions.html", submissions=rows)
+
+
+# ── Account management (admin) ──────────────────────────────────────────────────
+
+def load_accounts():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, username, role, active, created_at, last_login
+                FROM accounts ORDER BY username
+            """)
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _active_admin_count(cur):
+    cur.execute("SELECT COUNT(*) AS cnt FROM accounts WHERE role = 'admin' AND active = TRUE")
+    return cur.fetchone()['cnt']
+
+
+@app.route('/accounts')
+@role_required('admin')
+def accounts():
+    return render_template('accounts.html', accounts=load_accounts())
+
+
+@app.route('/accounts/save', methods=['POST'])
+@role_required('admin')
+def save_account():
+    f = request.form
+    username = f.get('username', '').strip()
+    role     = f.get('role', 'viewer')
+    active   = f.get('active') == 'on' or f.get('active') == 'true'
+    password = f.get('password', '')
+    acct_id  = f.get('id', '').strip()
+
+    if not username:
+        return jsonify({'status': 'error', 'message': 'Username required'}), 400
+    if role not in ROLE_RANK:
+        return jsonify({'status': 'error', 'message': 'Invalid role'}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if acct_id:
+                # Guard: don't let the last active admin be demoted/disabled.
+                cur.execute("SELECT username, role, active FROM accounts WHERE id = %s", (acct_id,))
+                existing = cur.fetchone()
+                if not existing:
+                    return jsonify({'status': 'error', 'message': 'Account not found'}), 404
+                losing_admin = (existing['role'] == 'admin' and existing['active']
+                                and (role != 'admin' or not active))
+                if losing_admin and _active_admin_count(cur) <= 1:
+                    return jsonify({'status': 'error',
+                                    'message': 'Cannot demote or disable the last active admin.'}), 400
+                if password:
+                    cur.execute("""
+                        UPDATE accounts SET username=%s, role=%s, active=%s, password_hash=%s
+                         WHERE id=%s
+                    """, (username, role, active, generate_password_hash(password), acct_id))
+                else:
+                    cur.execute("UPDATE accounts SET username=%s, role=%s, active=%s WHERE id=%s",
+                                (username, role, active, acct_id))
+            else:
+                if not password:
+                    return jsonify({'status': 'error', 'message': 'Password required for new account'}), 400
+                cur.execute("""
+                    INSERT INTO accounts (username, password_hash, role, active, created_at)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (username) DO NOTHING
+                """, (username, generate_password_hash(password), role, active, _utcnow()))
+    return redirect(url_for('accounts'))
+
+
+@app.route('/accounts/delete', methods=['POST'])
+@role_required('admin')
+def delete_account():
+    acct_id = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, role, active FROM accounts WHERE id = %s", (acct_id,))
+            acct = cur.fetchone()
+            if not acct:
+                return redirect(url_for('accounts'))
+            if acct['username'] == session.get('user'):
+                return render_template('403.html', message="You cannot delete your own account."), 400
+            if acct['role'] == 'admin' and acct['active'] and _active_admin_count(cur) <= 1:
+                return render_template('403.html', message="Cannot delete the last active admin."), 400
+            cur.execute("DELETE FROM accounts WHERE id = %s", (acct_id,))
+    return redirect(url_for('accounts'))
+
+
+@app.route('/account/password', methods=['POST'])
+@login_required
+def change_password():
+    """Any logged-in user changes their own password."""
+    current = request.form.get('current', '')
+    new     = request.form.get('new', '')
+    if not new:
+        return jsonify({'status': 'error', 'message': 'New password required'}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, password_hash FROM accounts WHERE username = %s",
+                        (session.get('user'),))
+            acct = cur.fetchone()
+            if not acct or not check_password_hash(acct['password_hash'], current):
+                return jsonify({'status': 'error', 'message': 'Current password is incorrect'}), 400
+            cur.execute("UPDATE accounts SET password_hash = %s WHERE id = %s",
+                        (generate_password_hash(new), acct['id']))
+    return jsonify({'status': 'success', 'message': 'Password changed'})
+
 
 @app.route('/report')
 @login_required
@@ -549,33 +1141,48 @@ def report():
 # ── Import ────────────────────────────────────────────────────────────────────
 
 @app.route('/import', methods=['GET', 'POST'])
-@login_required
+@role_required('operator')
 def import_users():
     message = ""
     if request.method == 'POST':
         file           = request.files.get('file')
         group_override = request.form.get('group_override', '').strip()
 
-        if file and file.filename.endswith('.csv'):
+        if file and file.filename and file.filename.lower().endswith('.csv'):
             filepath = os.path.join('uploads', secure_filename(file.filename))
             os.makedirs('uploads', exist_ok=True)
             file.save(filepath)
 
-            count = 0
-            with open(filepath, 'r') as f:
-                for row in csv.DictReader(f):
-                    user = {
-                        'username':   row['username'].strip(),
-                        'first_name': row['first_name'].strip(),
-                        'last_name':  row['last_name'].strip(),
-                        'email':      row['email'].strip(),
-                        'group':      group_override or row.get('group', '').strip(),
-                        'track_open': 'no',
-                    }
-                    generate_link(user)
-                    count += 1
-
-            message = f"✅ {count} users imported successfully."
+            count, skipped = 0, 0
+            with open(filepath, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                headers = {(h or '').strip().lower() for h in (reader.fieldnames or [])}
+                required = {'username', 'first_name', 'last_name', 'email'}
+                missing = required - headers
+                if missing:
+                    message = ("❌ CSV is missing required column(s): "
+                               + ", ".join(sorted(missing))
+                               + ". Expected headers: username, first_name, last_name, email, group.")
+                else:
+                    for row in reader:
+                        username = (row.get('username') or '').strip()
+                        email    = (row.get('email') or '').strip()
+                        if not username or not email:
+                            skipped += 1
+                            continue
+                        user = {
+                            'username':   username,
+                            'first_name': (row.get('first_name') or '').strip(),
+                            'last_name':  (row.get('last_name') or '').strip(),
+                            'email':      email,
+                            'group':      group_override or (row.get('group') or '').strip(),
+                            'track_open': 'no',
+                        }
+                        generate_link(user)
+                        count += 1
+                    message = f"✅ {count} users imported successfully."
+                    if skipped:
+                        message += f" ({skipped} row(s) skipped — missing username/email.)"
         else:
             message = "Please upload a valid CSV file."
 
@@ -585,20 +1192,21 @@ def import_users():
 # ── Reset analytics ───────────────────────────────────────────────────────────
 
 @app.route('/reset-analytics', methods=['POST'])
-@login_required
+@role_required('operator')
 def reset_analytics():
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM clicks")
             cur.execute("DELETE FROM opens")
             cur.execute("DELETE FROM email_log")
+            cur.execute("DELETE FROM submissions")
     return jsonify({'status': 'success', 'message': 'Analytics reset'})
 
 
 # ── Email template management ─────────────────────────────────────────────────
 
 @app.route('/save-template', methods=['POST'])
-@login_required
+@role_required('operator')
 def save_template():
     name    = request.form.get('template_name', '').strip()
     content = request.form.get('template_content', '')
@@ -614,7 +1222,7 @@ def save_template():
 
 
 @app.route('/delete-template', methods=['POST'])
-@login_required
+@role_required('operator')
 def delete_template():
     name = request.form.get('template_name', '').strip()
     with get_db() as conn:
@@ -623,8 +1231,177 @@ def delete_template():
     return jsonify({'status': 'success'})
 
 
+# ── SMTP config management ──────────────────────────────────────────────────────
+
+@app.route('/smtp-configs')
+@role_required('operator')
+def smtp_configs():
+    return render_template('smtp_configs.html', configs=load_smtp_configs())
+
+
+@app.route('/smtp-configs/save', methods=['POST'])
+@role_required('operator')
+def save_smtp_config():
+    f = request.form
+    name = f.get('name', '').strip()
+    if not name:
+        return jsonify({'status': 'error', 'message': 'Name is required'}), 400
+
+    try:
+        port = int(f.get('port') or 587)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Port must be a number'}), 400
+
+    config_id  = f.get('id', '').strip()
+    security   = (f.get('security') or 'starttls').lower()
+    if security not in ('starttls', 'ssl', 'none'):
+        security = 'starttls'
+
+    values = (
+        name, f.get('server', '').strip(), port,
+        f.get('username', '').strip(), f.get('password', ''),
+        security, f.get('from_email', '').strip(),
+        f.get('from_name', '').strip(), f.get('default_subject', '').strip(),
+    )
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if config_id:
+                cur.execute("""
+                    UPDATE smtp_configs
+                       SET name=%s, server=%s, port=%s, username=%s, password=%s,
+                           security=%s, from_email=%s, from_name=%s, default_subject=%s
+                     WHERE id=%s
+                """, values + (config_id,))
+            else:
+                cur.execute("""
+                    INSERT INTO smtp_configs
+                        (name, server, port, username, password, security,
+                         from_email, from_name, default_subject)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, values)
+                # First config becomes active automatically.
+                cur.execute("""
+                    UPDATE smtp_configs SET is_active = TRUE
+                     WHERE NOT EXISTS (SELECT 1 FROM smtp_configs WHERE is_active = TRUE)
+                       AND name = %s
+                """, (name,))
+    return redirect(url_for('smtp_configs'))
+
+
+@app.route('/smtp-configs/delete', methods=['POST'])
+@role_required('operator')
+def delete_smtp_config():
+    config_id = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT is_active FROM smtp_configs WHERE id = %s", (config_id,))
+            row = cur.fetchone()
+            cur.execute("DELETE FROM smtp_configs WHERE id = %s", (config_id,))
+            # If we removed the active one, promote any remaining config.
+            if row and row['is_active']:
+                cur.execute("""
+                    UPDATE smtp_configs SET is_active = TRUE
+                     WHERE id = (SELECT id FROM smtp_configs ORDER BY name LIMIT 1)
+                """)
+    return redirect(url_for('smtp_configs'))
+
+
+@app.route('/smtp-configs/activate', methods=['POST'])
+@role_required('operator')
+def activate_smtp_config():
+    config_id = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE smtp_configs SET is_active = FALSE")
+            cur.execute("UPDATE smtp_configs SET is_active = TRUE WHERE id = %s", (config_id,))
+    return redirect(url_for('smtp_configs'))
+
+
+@app.route('/smtp-configs/test', methods=['POST'])
+@role_required('operator')
+def test_smtp_config():
+    config_id = request.form.get('id', '').strip()
+    to_email  = request.form.get('to', '').strip()
+    cfg = get_smtp_config(config_id)
+    if not cfg:
+        return jsonify({'status': 'error', 'message': 'Config not found'}), 404
+    if not to_email:
+        return jsonify({'status': 'error', 'message': 'Recipient required'}), 400
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"RabbitHole SMTP test — {cfg['name']}"
+    msg["From"]    = smtp_from_header(cfg)
+    msg["To"]      = to_email
+    msg.attach(MIMEText(
+        f"<p>This is a test message from RabbitHole using SMTP config "
+        f"<b>{cfg['name']}</b> ({cfg['server']}:{cfg['port']}, {cfg['security']}).</p>",
+        "html"))
+    try:
+        with smtp_connection(cfg) as server:
+            server.send_message(msg)
+        return jsonify({'status': 'success', 'message': f'Test sent to {to_email}'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ── Landing page management ─────────────────────────────────────────────────────
+
+@app.route('/landing-pages')
+@role_required('operator')
+def landing_pages():
+    return render_template('landing_pages.html', pages=load_landing_pages(),
+                           default_html=DEFAULT_LANDING_HTML)
+
+
+@app.route('/landing-pages/save', methods=['POST'])
+@role_required('operator')
+def save_landing_page():
+    f = request.form
+    name = f.get('name', '').strip()
+    if not name:
+        return jsonify({'status': 'error', 'message': 'Name is required'}), 400
+    lp_id = f.get('id', '').strip()
+    values = (name, f.get('html', ''), f.get('thankyou', ''))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if lp_id:
+                cur.execute("UPDATE landing_pages SET name=%s, html=%s, thankyou=%s WHERE id=%s",
+                            values + (lp_id,))
+            else:
+                cur.execute("""
+                    INSERT INTO landing_pages (name, html, thankyou, created_at)
+                    VALUES (%s,%s,%s,%s)
+                """, values + (_utcnow(),))
+    return redirect(url_for('landing_pages'))
+
+
+@app.route('/landing-pages/delete', methods=['POST'])
+@role_required('operator')
+def delete_landing_page():
+    lp_id = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM landing_pages WHERE id = %s", (lp_id,))
+    return redirect(url_for('landing_pages'))
+
+
+@app.route('/landing-pages/<int:lp_id>/preview')
+@role_required('operator')
+def preview_landing_page(lp_id):
+    lp = get_landing_page(lp_id)
+    if not lp:
+        return redirect(url_for('landing_pages'))
+    sample = {'first_name': 'Sample', 'last_name': 'User', 'email': 'sample.user@example.com'}
+    resp = make_response(render_landing(lp, sample, 'PREVIEW-TOKEN', 'preview'))
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+
+
+# ── Email template & send ─────────────────────────────────────────────────────
+
 @app.route('/email-template', methods=['GET', 'POST'])
-@login_required
+@role_required('operator')
 def email_template():
     all_users = load_users()
 
@@ -647,11 +1424,14 @@ def email_template():
 
     users = [u for u in all_users if u['group'] == selected_group] if selected_group else []
 
+    campaign   = request.form.get('campaign', '').strip()
+    link_text  = request.form.get('link_text', '').strip() or 'Click here'
+    landing_id = request.form.get('landing_page_id', '').strip() or None
+
     if request.method == 'POST' and request.form.get('action') == 'generate':
         for u in users:
             if u['username'] in selected_usernames:
-                link_url  = f"{TRACKING_BASE_URL}/hit?uid={u['token']}"
-                pixel_url = f"{TRACKING_BASE_URL}/img/{u['token']}.png"
+                link_url, pixel_url = tracking_urls(u['token'], campaign, landing_id)
                 pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
                 track_open = u.get('track_open') == 'yes'
                 body = template_text \
@@ -659,77 +1439,306 @@ def email_template():
                     .replace("{{last_name}}",  u['last_name']) \
                     .replace("{{email}}",      u['email']) \
                     .replace("{{token}}",      u['token']) \
-                    .replace("{{link}}",       f'<a href="{link_url}">Click here</a>') \
+                    .replace("{{link}}",       f'<a href="{link_url}">{link_text}</a>') \
                     .replace("{{pixel}}",      pixel_tag if track_open else '')
                 if track_open and pixel_url not in body:
                     body += pixel_tag
                 generated.append({'email': u['email'], 'body': body})
 
     saved_templates = load_templates()
+    smtp_list       = load_smtp_configs()
+    landing_list    = load_landing_pages()
     return render_template("email_template.html", groups=groups, users=users,
                            selected_group=selected_group, template_text=template_text,
-                           generated=generated, saved_templates=saved_templates)
+                           generated=generated, saved_templates=saved_templates,
+                           smtp_configs=smtp_list, landing_pages=landing_list)
 
 
-# ── Send emails ───────────────────────────────────────────────────────────────
+# ── Campaigns (background senders) ──────────────────────────────────────────────
+
+def _campaign_update(cid, **fields):
+    """Persist progress/state for a campaign row."""
+    if not fields:
+        return
+    cols = ', '.join(f"{k} = %s" for k in fields)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE campaigns SET {cols} WHERE id = %s",
+                        (*fields.values(), cid))
+
+
+def _campaign_stop_requested(cid):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT stop_requested FROM campaigns WHERE id = %s", (cid,))
+            row = cur.fetchone()
+            return bool(row and row['stop_requested'])
+
+
+def _run_campaign(cid, users, template, subject, link_text, cfg, delay, label, landing_id=None):
+    """Background worker: sends one campaign's emails, updating progress in the DB
+    and honouring a cooperative stop request. Runs in its own thread so several
+    campaigns can send at the same time."""
+    from_hdr = smtp_from_header(cfg)
+    try:
+        server = smtp_connection(cfg)
+    except Exception as e:
+        _campaign_update(cid, status='failed', last_error=f"SMTP connect: {e}",
+                         finished_at=_utcnow())
+        print(f"❌ Campaign {cid} failed to connect: {e}")
+        return
+
+    sent = failed = 0
+    stopped = False
+    try:
+        for user in users:
+            if _campaign_stop_requested(cid):
+                stopped = True
+                break
+
+            to_email   = user['email']
+            track_open = user.get('track_open') == 'yes'
+            link_url, pixel_url = tracking_urls(user['token'], label, landing_id)
+            pixel_tag  = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
+
+            body = template \
+                .replace("{{first_name}}", user['first_name']) \
+                .replace("{{last_name}}",  user['last_name']) \
+                .replace("{{email}}",      user['email']) \
+                .replace("{{token}}",      user['token']) \
+                .replace("{{link}}",       f'<a href="{link_url}">{link_text}</a>') \
+                .replace("{{pixel}}",      pixel_tag if track_open else '')
+            if track_open and pixel_url not in body:
+                body += pixel_tag
+
+            msg            = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"]    = from_hdr
+            msg["To"]      = to_email
+            msg.attach(MIMEText(body, "html"))
+
+            try:
+                server.send_message(msg)
+                log_email_sent(user['username'], to_email, _utcnow(), label)
+                sent += 1
+                _campaign_update(cid, sent=sent)
+                print(f"✅ [{label}] sent to {to_email}")
+            except Exception as e:
+                failed += 1
+                _campaign_update(cid, failed=failed, last_error=str(e))
+                print(f"❌ [{label}] failed to {to_email}: {e}")
+
+            time.sleep(delay)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
+
+    final = 'stopped' if stopped else 'completed'
+    _campaign_update(cid, status=final, sent=sent, failed=failed, finished_at=_utcnow())
+    print(f"🏁 Campaign {cid} ({label}) {final}: {sent} sent, {failed} failed")
+
 
 @app.route('/send-emails', methods=['POST'])
-@login_required
+@role_required('operator')
 def send_emails():
+    """Launch a campaign as a background job and return immediately, so multiple
+    campaigns can run concurrently. Progress is tracked on the /campaigns page."""
     selected_usernames = request.form.getlist('usernames')
     template           = request.form.get('template')
-    delay              = int(request.form.get('delay', 5))
+    delay              = max(0, int(request.form.get('delay', 5) or 0))
+    config_id          = request.form.get('smtp_config_id', '').strip() or None
+    subject_override   = request.form.get('subject', '').strip()
+    link_text          = request.form.get('link_text', '').strip() or 'Click here'
+    label              = request.form.get('campaign', '').strip()
+    landing_id         = request.form.get('landing_page_id', '').strip() or None
 
     if not selected_usernames:
         return render_template("email_sent_summary.html", sent=[], count=0,
                                message="❌ No users selected.")
 
+    cfg = get_smtp_config(config_id)
+    if not cfg:
+        return render_template("email_sent_summary.html", sent=[], count=0,
+                               message="❌ No SMTP config available. Add one under SMTP.")
+
     all_users     = load_users()
     users_to_send = [u for u in all_users if u['username'] in selected_usernames]
-    sent          = []
+    if not users_to_send:
+        return render_template("email_sent_summary.html", sent=[], count=0,
+                               message="❌ No matching users.")
 
-    for user in users_to_send:
-        to_email   = user['email']
-        link_url   = user['link']
-        track_open = user.get('track_open') == 'yes'
-        pixel_url  = f"{TRACKING_BASE_URL}/img/{user['token']}.png"
-        pixel_tag  = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
+    subject = subject_override or cfg.get('default_subject') or 'RabbitHole'
+    if not label:
+        label = f"{cfg['name']}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
-        body = template \
-            .replace("{{first_name}}", user['first_name']) \
-            .replace("{{last_name}}",  user['last_name']) \
-            .replace("{{email}}",      user['email']) \
-            .replace("{{token}}",      user['token']) \
-            .replace("{{link}}",       f'<a href="{link_url}">CHECK AND VERIFY SALARY SLIP</a>') \
-            .replace("{{pixel}}",      pixel_tag if track_open else '')
+    lp = get_landing_page(landing_id) if landing_id else None
+    landing_name = lp['name'] if lp else ''
 
-        if track_open and pixel_url not in body:
-            body += pixel_tag
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO campaigns
+                    (name, smtp_config_id, smtp_name, subject, delay, total, status,
+                     created_at, landing_page_id, landing_name)
+                VALUES (%s,%s,%s,%s,%s,%s,'running',%s,%s,%s)
+                RETURNING id
+            """, (label, cfg['id'], cfg['name'], subject, delay,
+                  len(users_to_send), _utcnow(), landing_id, landing_name))
+            cid = cur.fetchone()['id']
 
-        msg            = MIMEMultipart("alternative")
-        msg["Subject"] = "[Update] New Salary Format - Update Details"
-        msg["From"]    = SMTP_USER
-        msg["To"]      = to_email
-        msg.attach(MIMEText(body, "html"))
+    thread = threading.Thread(
+        target=_run_campaign,
+        args=(cid, users_to_send, template, subject, link_text, cfg, delay, label, landing_id),
+        daemon=True,
+    )
+    thread.start()
 
-        try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(SMTP_USER, SMTP_PASS)
-                server.send_message(msg)
+    return redirect(url_for('campaigns'))
 
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            log_email_sent(user['username'], to_email, timestamp)
-            sent.append(to_email)
-            print(f"✅ Sent to {to_email}")
-            time.sleep(delay)
-        except Exception as e:
-            print(f"❌ Failed to send to {to_email}: {e}")
 
-    return render_template("email_sent_summary.html", sent=sent, count=len(sent),
-                           message="✅ Emails sent.")
+@app.route('/campaigns')
+@login_required
+def campaigns():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM campaigns
+                ORDER BY (status = 'running') DESC, id DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    return render_template("campaigns.html", campaigns=rows)
+
+
+@app.route('/campaigns/<int:cid>')
+@login_required
+def campaign_detail(cid):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
+            row = cur.fetchone()
+    if not row:
+        return redirect(url_for('campaigns'))
+    return render_template("campaign_detail.html", campaign=dict(row))
+
+
+@app.route('/api/campaign/<int:cid>')
+@login_required
+def api_campaign_detail(cid):
+    """Per-recipient breakdown for one campaign: sent / opened / clicked,
+    joined on the campaign's tracking label."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({'error': 'not found'}), 404
+            camp  = dict(row)
+            label = camp['name']
+
+            cur.execute("""
+                SELECT username, email, MIN(timestamp) AS sent_time
+                FROM email_log WHERE campaign = %s
+                GROUP BY username, email
+            """, (label,))
+            sent_rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT username, token, first_name, last_name, grp AS "group"
+                FROM users
+            """)
+            by_username = {r['username']: dict(r) for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT token, COUNT(*) AS opens, MIN(timestamp) AS first_open
+                FROM opens WHERE campaign = %s GROUP BY token
+            """, (label,))
+            opens_by_token = {r['token']: dict(r) for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT token, COUNT(*) AS clicks, MAX(timestamp) AS last_click,
+                       STRING_AGG(DISTINCT ip, ', ') AS ips
+                FROM clicks WHERE campaign = %s GROUP BY token
+            """, (label,))
+            clicks_by_token = {r['token']: dict(r) for r in cur.fetchall()}
+
+            cur.execute("""
+                SELECT token, COUNT(*) AS subs, MAX(timestamp) AS last_submit
+                FROM submissions WHERE campaign = %s GROUP BY token
+            """, (label,))
+            subs_by_token = {r['token']: dict(r) for r in cur.fetchall()}
+
+    recipients = []
+    for s in sent_rows:
+        u     = by_username.get(s['username'], {})
+        token = u.get('token', '')
+        op    = opens_by_token.get(token, {})
+        cl    = clicks_by_token.get(token, {})
+        sb    = subs_by_token.get(token, {})
+        recipients.append({
+            'username':    s['username'],
+            'name':        f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
+            'email':       s['email'],
+            'group':       u.get('group', ''),
+            'sent_time':   s['sent_time'],
+            'opened':      bool(op),
+            'first_open':  op.get('first_open', ''),
+            'clicks':      cl.get('clicks', 0),
+            'last_click':  cl.get('last_click', ''),
+            'ips':         cl.get('ips', '') or '',
+            'submitted':   bool(sb),
+            'submit_time': sb.get('last_submit', ''),
+        })
+
+    recipients.sort(key=lambda r: (r['submitted'], r['clicks'] > 0, r['opened'], r['clicks']),
+                    reverse=True)
+    summary = {
+        'recipients': len(recipients),
+        'opened':     sum(1 for r in recipients if r['opened']),
+        'clicked':    sum(1 for r in recipients if r['clicks'] > 0),
+        'submitted':  sum(1 for r in recipients if r['submitted']),
+    }
+    return jsonify({'campaign': camp, 'recipients': recipients, 'summary': summary})
+
+
+@app.route('/api/campaign-status')
+@login_required
+def api_campaign_status():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, smtp_name, subject, delay, total, sent, failed,
+                       status, stop_requested, last_error, created_at, finished_at
+                FROM campaigns
+                ORDER BY (status = 'running') DESC, id DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({'campaigns': rows})
+
+
+@app.route('/campaigns/stop', methods=['POST'])
+@role_required('operator')
+def stop_campaign():
+    cid = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE campaigns SET stop_requested = TRUE, status = 'stopping'
+                 WHERE id = %s AND status = 'running'
+            """, (cid,))
+    return jsonify({'status': 'success'})
+
+
+@app.route('/campaigns/delete', methods=['POST'])
+@role_required('operator')
+def delete_campaign():
+    cid = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Don't delete a live job out from under its worker.
+            cur.execute("DELETE FROM campaigns WHERE id = %s AND status <> 'running'", (cid,))
+    return redirect(url_for('campaigns'))
 
 
 # ── Sent status ───────────────────────────────────────────────────────────────
@@ -781,4 +1790,6 @@ def export_csv():
 init_db()
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5001)
+    # threaded=True so the UI (campaign status polling, etc.) stays responsive
+    # while background sender threads are running.
+    app.run(host='127.0.0.1', port=5001, threaded=True)

@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Landing Pages{% endblock %}
+
+{% block body %}
+<div class="page-sm mt-6">
+
+  <div class="page-header flex-between">
+    <div>
+      <h1>Landing Pages</h1>
+      <p>Pages shown to targets who click — capture name &amp; email to confirm a data-entry</p>
+    </div>
+    <a href="/submissions" class="btn btn-outline btn-sm" style="align-self:center;">View Submissions →</a>
+  </div>
+
+  <!-- Saved pages -->
+  <div class="card">
+    <div class="card-title">Saved Pages</div>
+    {% if pages %}
+    <div class="table-wrap">
+    <table class="rh-table">
+      <thead><tr><th>Name</th><th>Created</th><th style="text-align:right;">Actions</th></tr></thead>
+      <tbody>
+        {% for p in pages %}
+        <tr>
+          <td><strong>{{ p.name }}</strong></td>
+          <td class="text-sm text-muted">{{ p.created_at or '—' }}</td>
+          <td style="text-align:right;white-space:nowrap;">
+            <a class="btn btn-outline btn-sm" href="/landing-pages/{{ p.id }}/preview" target="_blank">Preview</a>
+            <button class="btn btn-outline btn-sm" type="button" onclick='editPage({{ p | tojson }})'>Edit</button>
+            <form method="post" action="/landing-pages/delete" style="display:inline;"
+                  onsubmit="return confirm('Delete {{ p.name }}?');">
+              <input type="hidden" name="id" value="{{ p.id }}">
+              <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="text-muted text-sm">No landing pages yet. Create one below.</p>
+    {% endif %}
+  </div>
+
+  <!-- Add / edit form -->
+  <div class="card mt-4">
+    <div class="card-title" id="formTitle">Add Page</div>
+    <form method="post" action="/landing-pages/save">
+      <input type="hidden" name="id" id="f_id" value="">
+      <div class="form-group">
+        <label class="form-label">Page Name</label>
+        <input type="text" name="name" id="f_name" class="form-control" placeholder="e.g. Payroll Login" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Page HTML</label>
+        <p class="form-hint mb-2">
+          Use <code>{{ '{{form}}' }}</code> where the name/email form should appear.
+          Supports <code>{{ '{{first_name}}' }}</code>, <code>{{ '{{last_name}}' }}</code>, <code>{{ '{{email}}' }}</code>.
+        </p>
+        <textarea name="html" id="f_html" class="form-control" rows="14"
+                  style="font-family:monospace;font-size:.8rem;">{{ default_html }}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Thank-you Message <span class="text-muted text-sm">(shown after submit; HTML allowed)</span></label>
+        <textarea name="thankyou" id="f_thankyou" class="form-control" rows="3"
+                  style="font-family:monospace;font-size:.8rem;" placeholder="Thank you. Your information has been received."></textarea>
+      </div>
+      <div class="input-row mt-3">
+        <button type="submit" class="btn btn-primary">Save Page</button>
+        <button type="button" class="btn btn-outline" onclick="resetForm()">Clear</button>
+      </div>
+    </form>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function editPage(p) {
+  document.getElementById('formTitle').textContent = 'Edit Page — ' + p.name;
+  document.getElementById('f_id').value = p.id;
+  document.getElementById('f_name').value = p.name || '';
+  document.getElementById('f_html').value = p.html || '';
+  document.getElementById('f_thankyou').value = p.thankyou || '';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function resetForm() {
+  document.getElementById('formTitle').textContent = 'Add Page';
+  document.querySelector('form[action="/landing-pages/save"]').reset();
+  document.getElementById('f_id').value = '';
+}
+</script>
+{% endblock %}

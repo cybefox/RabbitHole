@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Accounts{% endblock %}
+
+{% block body %}
+<div class="page-sm mt-6">
+
+  <div class="page-header">
+    <h1>Operator Accounts</h1>
+    <p>Manage who can log in and what they can do</p>
+  </div>
+
+  <!-- Accounts list -->
+  <div class="card">
+    <div class="card-title">Accounts</div>
+    <div class="table-wrap">
+    <table class="rh-table">
+      <thead>
+        <tr><th>Username</th><th>Role</th><th>Status</th><th>Last Login</th><th style="text-align:right;">Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for a in accounts %}
+        <tr>
+          <td><strong>{{ a.username }}</strong>{% if a.username == current_user.username %} <span class="text-xs text-muted">(you)</span>{% endif %}</td>
+          <td><span class="badge badge-accent">{{ a.role }}</span></td>
+          <td>
+            {% if a.active %}<span class="badge badge-success">active</span>
+            {% else %}<span class="badge badge-danger">disabled</span>{% endif %}
+          </td>
+          <td class="text-sm text-muted">{{ a.last_login or '—' }}</td>
+          <td style="text-align:right;white-space:nowrap;">
+            <button class="btn btn-outline btn-sm" type="button" onclick='editAccount({{ a | tojson }})'>Edit</button>
+            {% if a.username != current_user.username %}
+            <form method="post" action="/accounts/delete" style="display:inline;"
+                  onsubmit="return confirm('Delete {{ a.username }}?');">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Add / edit account -->
+  <div class="card mt-4">
+    <div class="card-title" id="formTitle">Add Account</div>
+    <form method="post" action="/accounts/save">
+      <input type="hidden" name="id" id="f_id" value="">
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input type="text" name="username" id="f_username" class="form-control" autocomplete="off" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select name="role" id="f_role" class="form-select">
+            <option value="viewer">Viewer — read-only</option>
+            <option value="operator">Operator — run campaigns</option>
+            <option value="admin">Admin — full access</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password <span class="text-muted text-sm" id="pwHint">(required)</span></label>
+          <input type="password" name="password" id="f_password" class="form-control" autocomplete="new-password">
+        </div>
+        <div class="form-group" style="align-self:end;">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" name="active" id="f_active" checked>
+            <span class="form-check-label">Active</span>
+          </label>
+        </div>
+      </div>
+      <div class="input-row mt-3">
+        <button type="submit" class="btn btn-primary">Save Account</button>
+        <button type="button" class="btn btn-outline" onclick="resetForm()">Clear</button>
+      </div>
+      <p class="form-hint mt-2">On edit, leave the password blank to keep it unchanged.</p>
+    </form>
+  </div>
+
+  <!-- Change my password -->
+  <div class="card mt-4">
+    <div class="card-title">Change My Password</div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Current Password</label>
+        <input type="password" id="cp_current" class="form-control" autocomplete="current-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label">New Password</label>
+        <input type="password" id="cp_new" class="form-control" autocomplete="new-password">
+      </div>
+    </div>
+    <button type="button" class="btn btn-outline mt-2" onclick="changePassword()">Update Password</button>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function editAccount(a) {
+  document.getElementById('formTitle').textContent = 'Edit Account — ' + a.username;
+  document.getElementById('f_id').value = a.id;
+  document.getElementById('f_username').value = a.username || '';
+  document.getElementById('f_role').value = a.role || 'viewer';
+  document.getElementById('f_password').value = '';
+  document.getElementById('f_active').checked = !!a.active;
+  document.getElementById('pwHint').textContent = '(leave blank to keep)';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function resetForm() {
+  document.getElementById('formTitle').textContent = 'Add Account';
+  document.querySelector('form[action="/accounts/save"]').reset();
+  document.getElementById('f_id').value = '';
+  document.getElementById('pwHint').textContent = '(required)';
+}
+function changePassword() {
+  const data = new URLSearchParams({
+    current: document.getElementById('cp_current').value,
+    new: document.getElementById('cp_new').value,
+  });
+  fetch('/account/password', { method: 'POST', body: data })
+    .then(r => r.json())
+    .then(j => alert((j.status === 'success' ? '✅ ' : '❌ ') + j.message))
+    .catch(e => alert('❌ ' + e));
+}
+</script>
+{% endblock %}

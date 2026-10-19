@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Submissions{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+{% endblock %}
+
+{% block body %}
+<div class="page mt-6">
+
+  <div class="page-header mb-4">
+    <h1>Captured Submissions</h1>
+    <p>Data entered on landing pages — the strongest confirmation a target fell for it</p>
+  </div>
+
+  <div class="stat-grid mb-6">
+    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value">{{ submissions | length }}</div><div class="stat-label">Total Submissions</div></div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="rh-table" id="subsTable">
+      <thead>
+        <tr><th>Name</th><th>Email</th><th>Group</th><th>Campaign</th><th>Time</th><th>IP</th></tr>
+      </thead>
+      <tbody>
+        {% for s in submissions %}
+        <tr>
+          <td>{{ s.name or '—' }}</td>
+          <td>{{ s.email or '—' }}</td>
+          <td>{{ s.group or '—' }}</td>
+          <td>{{ s.campaign or '—' }}</td>
+          <td class="text-xs">{{ s.timestamp }}</td>
+          <td class="text-xs">{{ s.ip }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+<script>
+$(function () {
+  if ({{ submissions | length }} > 0)
+    $('#subsTable').DataTable({ pageLength: 25, ordering: true, order: [[4, 'desc']] });
+});
+</script>
+{% endblock %}

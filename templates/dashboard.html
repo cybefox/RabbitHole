@@ -49,6 +49,17 @@
     </div>
   </div>
 
+  <div class="page-header mt-2">
+    <h1>Campaign Breakdown</h1>
+    <p>Per-template results — compare several campaigns running at once</p>
+  </div>
+  <div class="table-wrap mb-6">
+    <table class="rh-table" id="campaignTable">
+      <thead><tr><th>Campaign</th><th>Sent</th><th>Opened</th><th>Unique Clicks</th><th>Total Clicks</th><th>Click Rate</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
   <div class="table-wrap mb-6">
     <div class="flex-between" style="padding:.8rem 1rem;border-bottom:1px solid var(--border);">
       <span class="text-xs text-muted" style="text-transform:uppercase;letter-spacing:.8px;font-weight:600;">Click Events</span>
@@ -79,6 +90,10 @@
 <script>
 let filterGroup = '', filterClick = '', pieChart = null, barChart = null;
 
+// Escape all dynamic values before putting them in innerHTML — some fields
+// (IP from X-Forwarded-For, campaign label) are attacker-controllable.
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
 function parseCSV(text) {
   const [head, ...rows] = text.trim().split('\n');
   const keys = head.split(',');
@@ -91,7 +106,7 @@ function parseCSV(text) {
 function populateGroupFilter(groups) {
   const dd = document.getElementById('groupFilter');
   dd.innerHTML = '<option value="">All Groups</option>';
-  [...groups].forEach(g => dd.innerHTML += `<option value="${g}">${g}</option>`);
+  [...groups].forEach(g => dd.innerHTML += `<option value="${esc(g)}">${esc(g)}</option>`);
 }
 
 function updateCharts(clicks, noClicks, groupMap) {
@@ -132,7 +147,7 @@ async function fetchDashboard() {
     if (hit) { groupMap[u.group].clicked++; clickCount++; } else noClick++;
 
     if ((filterGroup && u.group !== filterGroup) || (filterClick === 'clicked' && !hit) || (filterClick === 'not_clicked' && hit)) return;
-    tbody += `<tr><td>${u.first_name}</td><td>${u.last_name}</td><td>${u.email}</td><td>${u.group}</td><td><code>${u.token.substring(0,8)}…</code></td><td>${cd?.timestamp||'<span class="text-muted">—</span>'}</td><td>${cd?.ip||'<span class="text-muted">—</span>'}</td></tr>`;
+    tbody += `<tr><td>${esc(u.first_name)}</td><td>${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)}</td><td><code>${esc(u.token.substring(0,8))}…</code></td><td>${cd? esc(cd.timestamp) : '<span class="text-muted">—</span>'}</td><td>${cd? esc(cd.ip) : '<span class="text-muted">—</span>'}</td></tr>`;
   });
 
   document.querySelector('#clickTable tbody').innerHTML = tbody;
@@ -149,11 +164,21 @@ async function fetchRepeats() {
   let tbody = '';
   repeats.forEach(u => {
     const ips = Array.isArray(u.ip_list) ? u.ip_list.join(', ') : (u.ip_list||'');
-    tbody += `<tr><td>${u.first_name} ${u.last_name}</td><td>${u.email}</td><td>${u.group||'—'}</td><td><strong>${u.clicks}</strong></td><td>${u.first_click}</td><td>${u.last_click}</td><td>${ips}</td></tr>`;
+    tbody += `<tr><td>${esc(u.first_name)} ${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)||'—'}</td><td><strong>${esc(u.clicks)}</strong></td><td>${esc(u.first_click)}</td><td>${esc(u.last_click)}</td><td>${esc(ips)}</td></tr>`;
   });
   document.querySelector('#repeatTable tbody').innerHTML = tbody;
   if ($.fn.DataTable.isDataTable('#repeatTable')) $('#repeatTable').DataTable().destroy();
   $('#repeatTable').DataTable({ pageLength:25, ordering:true, language:{ emptyTable:'No repeated clicks yet' } });
+}
+
+async function fetchCampaigns() {
+  const { campaigns } = await fetch('/api/campaigns').then(r => r.json());
+  let tbody = '';
+  campaigns.forEach(c => {
+    tbody += `<tr><td><strong>${esc(c.campaign)}</strong></td><td>${esc(c.sent)}</td><td>${esc(c.opened)}</td><td>${esc(c.unique_clicks)}</td><td>${esc(c.total_clicks)}</td><td>${esc(c.click_rate)}%</td></tr>`;
+  });
+  document.querySelector('#campaignTable tbody').innerHTML =
+    tbody || '<tr><td colspan="6" class="text-muted">No campaign activity yet</td></tr>';
 }
 
 function resetAnalytics() {
@@ -163,6 +188,6 @@ function resetAnalytics() {
 
 document.getElementById('groupFilter').onchange = e => { filterGroup = e.target.value; fetchDashboard(); };
 document.getElementById('clickFilter').onchange = e => { filterClick = e.target.value; fetchDashboard(); };
-document.addEventListener('DOMContentLoaded', () => { fetchDashboard(); fetchRepeats(); });
+document.addEventListener('DOMContentLoaded', () => { fetchDashboard(); fetchRepeats(); fetchCampaigns(); });
 </script>
 {% endblock %}

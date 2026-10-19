@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Telemetry{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+{% endblock %}
+
+{% block body %}
+<div class="page mt-6">
+
+  <div class="page-header flex-between mb-4">
+    <div>
+      <h1>Repeat Offenders</h1>
+      <p>Users who clicked the lure in more than one campaign — prioritise these for awareness training</p>
+    </div>
+    <a href="/submissions" class="btn btn-outline btn-sm" style="align-self:center;">Captured Submissions →</a>
+  </div>
+
+  <div class="stat-grid mb-6">
+    <div class="stat-card"><div class="stat-icon">🚩</div><div class="stat-value" id="s_offenders">0</div><div class="stat-label">Repeat Offenders</div></div>
+    <div class="stat-card"><div class="stat-icon">🔁</div><div class="stat-value" id="s_worst">0</div><div class="stat-label">Most Campaigns Failed</div></div>
+    <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value" id="s_clicks">0</div><div class="stat-label">Total Clicks (offenders)</div></div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="rh-table" id="offenderTable">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Group</th>
+          <th>Campaigns Failed</th>
+          <th>Campaigns</th>
+          <th>Total Clicks</th>
+          <th>First Click</th>
+          <th>Last Click</th>
+          <th>IPs</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="9" class="text-muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <p class="form-hint mt-3">
+    "Failed" means a tracked link click. A user counts here only when they clicked in
+    <strong>two or more distinct campaigns</strong>. Untagged sends are excluded.
+  </p>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+<script>
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function load() {
+  const { offenders } = await fetch('/api/repeat-offenders').then(r => r.json());
+
+  document.getElementById('s_offenders').textContent = offenders.length;
+  document.getElementById('s_worst').textContent =
+    offenders.reduce((m, o) => Math.max(m, o.campaigns_failed), 0);
+  document.getElementById('s_clicks').textContent =
+    offenders.reduce((t, o) => t + Number(o.total_clicks || 0), 0);
+
+  const rows = offenders.map(o => {
+    const name = `${esc(o.first_name || '')} ${esc(o.last_name || '')}`.trim();
+    const tags = (o.campaigns || '').split(', ').filter(Boolean)
+      .map(c => `<span class="badge badge-danger" style="margin:1px;">${esc(c)}</span>`).join(' ');
+    return `<tr>
+      <td>${name || '<span class="text-muted">—</span>'}</td>
+      <td>${esc(o.email) || '<span class="text-muted">unknown</span>'}</td>
+      <td>${esc(o.group) || '—'}</td>
+      <td><strong>${o.campaigns_failed}</strong></td>
+      <td>${tags}</td>
+      <td>${o.total_clicks}</td>
+      <td class="text-xs">${esc(o.first_click)}</td>
+      <td class="text-xs">${esc(o.last_click)}</td>
+      <td class="text-xs">${esc(o.ips)}</td>
+    </tr>`;
+  }).join('');
+
+  document.querySelector('#offenderTable tbody').innerHTML =
+    rows || '<tr><td colspan="9" class="text-muted">No repeat offenders yet — nobody has clicked across multiple campaigns.</td></tr>';
+
+  if (offenders.length) {
+    $('#offenderTable').DataTable({ pageLength: 25, ordering: true, order: [[3, 'desc']], deferRender: true });
+  }
+}
+
+load();
+</script>
+{% endblock %}

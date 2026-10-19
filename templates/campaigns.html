@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Campaigns{% endblock %}
+
+{% block body %}
+<div class="page mt-6">
+
+  <div class="page-header flex-between mb-5">
+    <div>
+      <h1>Campaigns</h1>
+      <p>Background send jobs — several can run at the same time</p>
+    </div>
+    <div class="flex gap-2">
+      <a href="/email-template" class="btn btn-primary btn-sm">+ New Campaign</a>
+      <span id="live" class="text-xs text-muted" style="align-self:center;">live</span>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="rh-table" id="campaignTable">
+      <thead>
+        <tr>
+          <th>Campaign</th>
+          <th>SMTP</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Sent</th>
+          <th>Failed</th>
+          <th>Started</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="8" class="text-muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="form-hint mt-3">
+    Launched from the <a href="/email-template">Email</a> page — each send starts a job here and returns immediately,
+    so you can start the next one. Compare open/click results per campaign on the
+    <a href="/dashboard">Dashboard</a>.
+  </p>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const STATUS_BADGE = {
+  running:     'badge-info',
+  stopping:    'badge-warning',
+  completed:   'badge-success',
+  stopped:     'badge-warning',
+  failed:      'badge-danger',
+  interrupted: 'badge-danger',
+};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+}
+
+function row(c) {
+  const pct = c.total ? Math.round((c.sent + c.failed) * 100 / c.total) : 0;
+  const badge = STATUS_BADGE[c.status] || '';
+  const live = (c.status === 'running' || c.status === 'stopping');
+  let actions = '';
+  if (live) {
+    actions = `<button class="btn btn-danger btn-sm" onclick="stopCampaign('${c.id}')"
+                 ${c.stop_requested ? 'disabled' : ''}>Stop</button>`;
+  } else {
+    actions = `<form method="post" action="/campaigns/delete" style="display:inline;"
+                 onsubmit="return confirm('Delete this campaign record?');">
+                 <input type="hidden" name="id" value="${c.id}">
+                 <button class="btn btn-outline btn-sm" type="submit">Delete</button></form>`;
+  }
+  const err = c.last_error ? `<div class="text-xs" style="color:var(--danger);">${esc(c.last_error)}</div>` : '';
+  return `<tr>
+    <td><a href="/campaigns/${c.id}"><strong>${esc(c.name)}</strong></a><div class="text-xs text-muted">${esc(c.subject)}</div>${err}</td>
+    <td class="text-sm">${esc(c.smtp_name)}</td>
+    <td><span class="badge ${badge}">${esc(c.status)}</span></td>
+    <td style="min-width:160px;">
+      <div class="progress"><div class="progress-bar" style="width:${pct}%;"></div></div>
+      <div class="text-xs text-muted">${c.sent + c.failed} / ${c.total} (${pct}%)</div>
+    </td>
+    <td>${c.sent}</td>
+    <td>${c.failed}</td>
+    <td class="text-xs text-muted">${esc(c.created_at)}</td>
+    <td style="text-align:right;white-space:nowrap;">${actions}</td>
+  </tr>`;
+}
+
+async function refresh() {
+  try {
+    const { campaigns } = await fetch('/api/campaign-status').then(r => r.json());
+    const body = campaigns.length
+      ? campaigns.map(row).join('')
+      : '<tr><td colspan="8" class="text-muted">No campaigns yet. Launch one from the Email page.</td></tr>';
+    document.querySelector('#campaignTable tbody').innerHTML = body;
+  } catch (e) { /* keep last view on transient error */ }
+}
+
+function stopCampaign(id) {
+  if (!confirm('Stop this campaign? Already-sent emails cannot be recalled.')) return;
+  const data = new URLSearchParams({ id });
+  fetch('/campaigns/stop', { method: 'POST', body: data }).then(refresh);
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+{% endblock %}

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}SMTP{% endblock %}
+
+{% block body %}
+<div class="page-sm mt-6">
+
+  <div class="page-header">
+    <h1>SMTP Configurations</h1>
+    <p>Manage multiple sending profiles and switch the active one used for campaigns</p>
+  </div>
+
+  <!-- Saved configs -->
+  <div class="card">
+    <div class="card-title">Saved Profiles</div>
+
+    {% if configs %}
+    <div class="table-wrap">
+    <table class="rh-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Server</th>
+          <th>Security</th>
+          <th>From</th>
+          <th>Status</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in configs %}
+        <tr>
+          <td><strong>{{ c.name }}</strong></td>
+          <td class="text-sm">{{ c.server }}:{{ c.port }}</td>
+          <td class="text-sm">{{ c.security }}</td>
+          <td class="text-sm">{{ c.from_name }} &lt;{{ c.from_email or c.username }}&gt;</td>
+          <td>
+            {% if c.is_active %}
+              <span class="badge badge-success">Active</span>
+            {% else %}
+              <span class="text-muted text-sm">—</span>
+            {% endif %}
+          </td>
+          <td style="text-align:right;white-space:nowrap;">
+            {% if not c.is_active %}
+            <form method="post" action="/smtp-configs/activate" style="display:inline;">
+              <input type="hidden" name="id" value="{{ c.id }}">
+              <button class="btn btn-outline btn-sm" type="submit">Set Active</button>
+            </form>
+            {% endif %}
+            <button class="btn btn-outline btn-sm"
+                    onclick='editConfig({{ c | tojson }})' type="button">Edit</button>
+            <button class="btn btn-outline btn-sm"
+                    onclick="testConfig('{{ c.id }}')" type="button">Test</button>
+            <form method="post" action="/smtp-configs/delete" style="display:inline;"
+                  onsubmit="return confirm('Delete {{ c.name }}?');">
+              <input type="hidden" name="id" value="{{ c.id }}">
+              <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="text-muted text-sm">No SMTP profiles yet. Add one below.</p>
+    {% endif %}
+  </div>
+
+  <!-- Add / edit form -->
+  <div class="card mt-4">
+    <div class="card-title" id="formTitle">Add Profile</div>
+    <form method="post" action="/smtp-configs/save">
+      <input type="hidden" name="id" id="f_id" value="">
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">Profile Name</label>
+          <input type="text" name="name" id="f_name" class="form-control" placeholder="e.g. Hostinger — Finance" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Security</label>
+          <select name="security" id="f_security" class="form-select">
+            <option value="starttls">STARTTLS (587)</option>
+            <option value="ssl">SSL/TLS (465)</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">SMTP Server</label>
+          <input type="text" name="server" id="f_server" class="form-control" placeholder="smtp.example.com" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Port</label>
+          <input type="number" name="port" id="f_port" class="form-control" value="587">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input type="text" name="username" id="f_username" class="form-control" placeholder="user@example.com" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" name="password" id="f_password" class="form-control" placeholder="••••••••" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label class="form-label">From Name</label>
+          <input type="text" name="from_name" id="f_from_name" class="form-control" placeholder="IT Helpdesk">
+        </div>
+        <div class="form-group">
+          <label class="form-label">From Email</label>
+          <input type="email" name="from_email" id="f_from_email" class="form-control" placeholder="it@example.com">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Default Subject</label>
+        <input type="text" name="default_subject" id="f_default_subject" class="form-control" placeholder="Phishing Awareness">
+      </div>
+      <div class="input-row mt-3">
+        <button type="submit" class="btn btn-primary">Save Profile</button>
+        <button type="button" class="btn btn-outline" onclick="resetForm()">Clear</button>
+      </div>
+      <p class="form-hint mt-2">Editing updates the existing profile. Leave the password blank only if the server needs none.</p>
+    </form>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function editConfig(c) {
+  document.getElementById('formTitle').textContent = 'Edit Profile — ' + c.name;
+  document.getElementById('f_id').value = c.id;
+  document.getElementById('f_name').value = c.name || '';
+  document.getElementById('f_server').value = c.server || '';
+  document.getElementById('f_port').value = c.port || 587;
+  document.getElementById('f_username').value = c.username || '';
+  document.getElementById('f_password').value = c.password || '';
+  document.getElementById('f_security').value = c.security || 'starttls';
+  document.getElementById('f_from_name').value = c.from_name || '';
+  document.getElementById('f_from_email').value = c.from_email || '';
+  document.getElementById('f_default_subject').value = c.default_subject || '';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+function resetForm() {
+  document.getElementById('formTitle').textContent = 'Add Profile';
+  document.querySelector('form[action="/smtp-configs/save"]').reset();
+  document.getElementById('f_id').value = '';
+}
+
+function testConfig(id) {
+  const to = prompt('Send a test email to which address?');
+  if (!to) return;
+  const data = new URLSearchParams({ id: id, to: to });
+  fetch('/smtp-configs/test', { method: 'POST', body: data })
+    .then(r => r.json())
+    .then(j => alert((j.status === 'success' ? '✅ ' : '❌ ') + j.message))
+    .catch(e => alert('❌ ' + e));
+}
+</script>
+{% endblock %}

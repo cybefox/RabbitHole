@@ -110,13 +110,58 @@
           </div>
 
           <div class="form-group mt-4">
+            <label class="form-label">SMTP Profile</label>
+            {% if smtp_configs %}
+            <select name="smtp_config_id" class="form-select">
+              {% for c in smtp_configs %}
+              <option value="{{ c.id }}" {{ 'selected' if c.is_active }}>
+                {{ c.name }}{{ ' (active)' if c.is_active }} — {{ c.server }}
+              </option>
+              {% endfor %}
+            </select>
+            <p class="form-hint mt-1">Leave on the active profile, or pick another for this send.</p>
+            {% else %}
+            <p class="form-hint">No SMTP profiles configured. <a href="/smtp-configs">Add one</a> before sending.</p>
+            {% endif %}
+          </div>
+
+          <div class="form-group mt-4">
+            <label class="form-label">Landing Page <span class="text-muted text-sm">(optional)</span></label>
+            <select name="landing_page_id" class="form-select">
+              <option value="">None — redirect only</option>
+              {% for p in landing_pages %}
+              <option value="{{ p.id }}">{{ p.name }}</option>
+              {% endfor %}
+            </select>
+            <p class="form-hint mt-1">If set, clicking the link shows this page and captures name &amp; email. <a href="/landing-pages">Manage pages</a>.</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Campaign / Tracking Label</label>
+            <input type="text" name="campaign" id="campaignInput" class="form-control"
+                   value="{{ request.form.get('campaign', '') }}" placeholder="e.g. salary-slip-oct">
+            <p class="form-hint mt-1">Tags every open &amp; click from this send so you can run several templates at once and compare them on the dashboard.</p>
+          </div>
+
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Subject <span class="text-muted text-sm">(optional)</span></label>
+              <input type="text" name="subject" class="form-control" placeholder="Uses profile default if blank">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Link Text</label>
+              <input type="text" name="link_text" class="form-control" value="Click here" placeholder="Click here">
+            </div>
+          </div>
+
+          <div class="form-group mt-2">
             <label class="form-label">Delay Between Emails (seconds)</label>
             <input type="number" name="delay" class="form-control" value="3" style="max-width:100px;">
           </div>
 
           <div class="flex gap-3 mt-4">
             <button type="submit" name="action" value="generate" formaction="/email-template" class="btn btn-outline">Preview</button>
-            <button type="submit" name="action" value="send" formaction="/send-emails" class="btn btn-success">Send Emails</button>
+            <button type="submit" name="action" value="send" formaction="/send-emails" class="btn btn-success">Launch Campaign</button>
           </div>
         </form>
       </div>
@@ -167,6 +212,9 @@ function loadTemplate() {
   const opt = sel.options[sel.selectedIndex];
   if (!opt.value) return;
   document.getElementById('templateArea').value = opt.getAttribute('data-content');
+  // Default the campaign label to the template name if none set yet.
+  const camp = document.getElementById('campaignInput');
+  if (camp && !camp.value.trim()) camp.value = opt.value;
 }
 function deleteTemplate() {
   const sel = document.getElementById('savedTemplateSelect');

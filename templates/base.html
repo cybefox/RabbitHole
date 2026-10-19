@@ -11,17 +11,26 @@
 
 <nav class="rh-nav">
   <a class="brand" href="/">🐇 RabbitHole</a>
+  {% set can_write = current_user.role in ['operator', 'admin'] %}
   <div class="nav-links">
     <a href="/dashboard"      class="{{ 'active' if request.path == '/dashboard' }}">Dashboard</a>
-    <a href="/generate"       class="{{ 'active' if request.path == '/generate' }}">Generate</a>
-    <a href="/import"         class="{{ 'active' if request.path == '/import' }}">Import</a>
+    {% if can_write %}<a href="/generate" class="{{ 'active' if request.path == '/generate' }}">Generate</a>{% endif %}
+    {% if can_write %}<a href="/import"   class="{{ 'active' if request.path == '/import' }}">Import</a>{% endif %}
     <a href="/users"          class="{{ 'active' if request.path == '/users' }}">Users</a>
     <a href="/report"         class="{{ 'active' if request.path == '/report' }}">Report</a>
-    <a href="/email-template" class="{{ 'active' if request.path == '/email-template' }}">Email</a>
+    {% if can_write %}<a href="/email-template" class="{{ 'active' if request.path == '/email-template' }}">Email</a>{% endif %}
+    {% if can_write %}<a href="/smtp-configs"   class="{{ 'active' if request.path == '/smtp-configs' }}">SMTP</a>{% endif %}
+    {% if can_write %}<a href="/landing-pages"  class="{{ 'active' if request.path == '/landing-pages' }}">Landing</a>{% endif %}
+    <a href="/campaigns"      class="{{ 'active' if request.path == '/campaigns' }}">Campaigns</a>
+    <a href="/telemetry"      class="{{ 'active' if request.path == '/telemetry' }}">Telemetry</a>
     <a href="/sent-status"    class="{{ 'active' if request.path == '/sent-status' }}">Sent Log</a>
+    {% if current_user.role == 'admin' %}<a href="/accounts" class="{{ 'active' if request.path == '/accounts' }}">Accounts</a>{% endif %}
   </div>
   <div class="nav-end">
     {% block nav_actions %}{% endblock %}
+    {% if current_user.username %}
+    <span class="text-sm text-muted" style="margin-right:.5rem;">{{ current_user.username }} <span class="badge badge-accent">{{ current_user.role }}</span></span>
+    {% endif %}
     <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
   </div>
 </nav>

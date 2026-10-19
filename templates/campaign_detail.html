@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}{{ campaign.name }}{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+{% endblock %}
+
+{% block nav_actions %}
+<a href="/campaigns" class="btn btn-outline btn-sm">← All Campaigns</a>
+{% endblock %}
+
+{% block body %}
+<div class="page mt-6" data-cid="{{ campaign.id }}">
+
+  <div class="page-header flex-between mb-4">
+    <div>
+      <h1>{{ campaign.name }}</h1>
+      <p id="subject">{{ campaign.subject }}</p>
+    </div>
+    <div class="flex gap-2" style="align-items:center;">
+      <span id="statusBadge" class="badge">{{ campaign.status }}</span>
+      {% if campaign.status in ('running', 'stopping') %}
+      <button class="btn btn-danger btn-sm" onclick="stopCampaign()">Stop</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Meta -->
+  <div class="card mb-4">
+    <div class="grid-2">
+      <div><span class="text-muted text-sm">SMTP Profile</span><div id="m_smtp">{{ campaign.smtp_name }}</div></div>
+      <div><span class="text-muted text-sm">Delay</span><div>{{ campaign.delay }}s between emails</div></div>
+      <div><span class="text-muted text-sm">Started</span><div>{{ campaign.created_at or '—' }}</div></div>
+      <div><span class="text-muted text-sm">Finished</span><div id="m_finished">{{ campaign.finished_at or '—' }}</div></div>
+      <div><span class="text-muted text-sm">Landing Page</span><div>{{ campaign.landing_name or '— (redirect only)' }}</div></div>
+    </div>
+    {% if campaign.last_error %}
+    <div class="alert alert-info mt-3" style="color:var(--danger);">Last error: {{ campaign.last_error }}</div>
+    {% endif %}
+  </div>
+
+  <!-- Progress + stats -->
+  <div class="mb-2">
+    <div class="progress" style="height:10px;"><div class="progress-bar" id="progBar" style="width:0%;"></div></div>
+    <div class="text-xs text-muted mt-1" id="progText">—</div>
+  </div>
+
+  <div class="stat-grid mb-6">
+    <div class="stat-card"><div class="stat-icon">🎯</div><div class="stat-value" id="s_total">{{ campaign.total }}</div><div class="stat-label">Recipients</div></div>
+    <div class="stat-card"><div class="stat-icon">📤</div><div class="stat-value" id="s_sent">{{ campaign.sent }}</div><div class="stat-label">Sent</div></div>
+    <div class="stat-card"><div class="stat-icon">⚠️</div><div class="stat-value" id="s_failed">{{ campaign.failed }}</div><div class="stat-label">Failed</div></div>
+    <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value" id="s_opened">0</div><div class="stat-label">Opened</div></div>
+    <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value" id="s_clicked">0</div><div class="stat-label">Clicked</div></div>
+    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value" id="s_submitted">0</div><div class="stat-label">Submitted</div></div>
+  </div>
+
+  <div class="page-header">
+    <h1>Recipients</h1>
+    <p>Who was sent to, and who opened or clicked — specific to this campaign</p>
+  </div>
+  <div class="table-wrap">
+    <table class="rh-table" id="recipientTable">
+      <thead>
+        <tr><th>Name</th><th>Email</th><th>Group</th><th>Sent</th><th>Opened</th><th>Clicks</th><th>Submitted</th><th>Last Click</th><th>IPs</th></tr>
+      </thead>
+      <tbody><tr><td colspan="9" class="text-muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+<script>
+const CID = document.querySelector('[data-cid]').dataset.cid;
+const BADGE = { running:'badge-info', stopping:'badge-warning', completed:'badge-success',
+                stopped:'badge-warning', failed:'badge-danger', interrupted:'badge-danger' };
+let dt = null;
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const yes = '<span class="badge badge-success">yes</span>';
+const no  = '<span class="text-muted">—</span>';
+
+async function refresh() {
+  const data = await fetch('/api/campaign/' + CID).then(r => r.json());
+  if (data.error) return;
+  const c = data.campaign, s = data.summary;
+
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = c.status;
+  badge.className = 'badge ' + (BADGE[c.status] || '');
+
+  document.getElementById('s_total').textContent   = c.total;
+  document.getElementById('s_sent').textContent    = c.sent;
+  document.getElementById('s_failed').textContent  = c.failed;
+  document.getElementById('s_opened').textContent  = s.opened;
+  document.getElementById('s_clicked').textContent = s.clicked;
+  document.getElementById('s_submitted').textContent = s.submitted;
+  document.getElementById('m_finished').textContent = c.finished_at || '—';
+
+  const done = c.sent + c.failed;
+  const pct = c.total ? Math.round(done * 100 / c.total) : 0;
+  document.getElementById('progBar').style.width = pct + '%';
+  document.getElementById('progText').textContent = `${done} / ${c.total} processed (${pct}%)`;
+
+  const rows = data.recipients.map(r => `<tr>
+    <td>${esc(r.name) || '<span class="text-muted">—</span>'}</td>
+    <td>${esc(r.email)}</td>
+    <td>${esc(r.group) || '—'}</td>
+    <td class="text-xs">${esc(r.sent_time) || no}</td>
+    <td>${r.opened ? yes + ' <span class="text-xs text-muted">' + esc(r.first_open) + '</span>' : no}</td>
+    <td>${r.clicks > 0 ? '<strong>' + r.clicks + '</strong>' : no}</td>
+    <td>${r.submitted ? '<span class="badge badge-danger">yes</span> <span class="text-xs text-muted">' + esc(r.submit_time) + '</span>' : no}</td>
+    <td class="text-xs">${esc(r.last_click) || no}</td>
+    <td class="text-xs">${esc(r.ips) || no}</td>
+  </tr>`).join('');
+
+  if (dt) { dt.destroy(); dt = null; }
+  document.querySelector('#recipientTable tbody').innerHTML =
+    rows || '<tr><td colspan="9" class="text-muted">No sends recorded yet</td></tr>';
+  if (data.recipients.length) {
+    dt = $('#recipientTable').DataTable({ pageLength: 25, ordering: true, deferRender: true });
+  }
+
+  // Stop polling once the campaign is finished.
+  if (!['running', 'stopping'].includes(c.status) && window._poll) {
+    clearInterval(window._poll); window._poll = null;
+  }
+}
+
+function stopCampaign() {
+  if (!confirm('Stop this campaign? Already-sent emails cannot be recalled.')) return;
+  fetch('/campaigns/stop', { method:'POST', body: new URLSearchParams({ id: CID }) }).then(refresh);
+}
+
+refresh();
+window._poll = setInterval(refresh, 3000);
+</script>
+{% endblock %}

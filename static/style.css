@@ -248,6 +248,25 @@ textarea.form-control { resize: vertical; min-height: 120px; line-height: 1.6; }
 .badge-success { background: rgba(16,185,129,.12); color: #34d399; border: 1px solid rgba(16,185,129,.2); }
 .badge-muted   { background: rgba(100,116,139,.12); color: #94a3b8; border: 1px solid rgba(100,116,139,.18); }
 .badge-accent  { background: rgba(99,102,241,.12); color: #a5b4fc; border: 1px solid rgba(99,102,241,.22); }
+.badge-info    { background: rgba(99,102,241,.12);  color: #a5b4fc; border: 1px solid rgba(99,102,241,.22); }
+.badge-warning { background: rgba(234,179,8,.12);   color: #facc15; border: 1px solid rgba(234,179,8,.22); }
+.badge-danger  { background: rgba(239,68,68,.12);   color: #f87171; border: 1px solid rgba(239,68,68,.22); }
+
+/* ── Progress bar ── */
+.progress {
+  width: 100%;
+  height: 7px;
+  background: rgba(100,116,139,.18);
+  border-radius: 20px;
+  overflow: hidden;
+  margin-bottom: 3px;
+}
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+  border-radius: 20px;
+  transition: width .4s ease;
+}
 
 /* ── Tables ── */
 .table-wrap {
