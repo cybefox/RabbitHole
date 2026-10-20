@@ -198,31 +198,32 @@ def init_db():
 
 
 def _seed_admin_account():
-    """If no operator accounts exist yet, bootstrap one admin so there is always a
-    way to log in and create the rest. The password comes from RABBITHOLE_ADMIN_PASS,
-    or — if unset — is randomly generated and printed once (no weak default)."""
+    """Ensure the bootstrap admin exists and has a password the operator knows.
+
+    If RABBITHOLE_ADMIN_PASS is set, the admin is pinned to that fixed password.
+    Otherwise a fresh random password is generated on EVERY launch, reset on the
+    admin row, and printed — so you always have current credentials. Note this
+    invalidates the previous launch's password each time the app starts."""
+    generated = ADMIN_PASS is None
+    password  = ADMIN_PASS or secrets.token_urlsafe(12)
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS cnt FROM accounts")
-            if cur.fetchone()['cnt'] != 0:
-                return
-            generated = ADMIN_PASS is None
-            password  = ADMIN_PASS or secrets.token_urlsafe(12)
             cur.execute("""
                 INSERT INTO accounts (username, password_hash, role, active, created_at)
                 VALUES (%s,%s,'admin',TRUE,%s)
-                ON CONFLICT (username) DO NOTHING
+                ON CONFLICT (username)
+                DO UPDATE SET password_hash = EXCLUDED.password_hash
             """, (ADMIN_USER, generate_password_hash(password), _utcnow()))
     if generated:
         print("\n" + "=" * 64)
-        print("  RabbitHole: bootstrapped admin account")
+        print("  RabbitHole: admin password for this launch")
         print(f"    username: {ADMIN_USER}")
         print(f"    password: {password}")
-        print("  Log in and change this password now. It is shown only once.")
-        print("  (Set RABBITHOLE_ADMIN_PASS to choose your own instead.)")
-        print("=" * 64 + "\n")
+        print("  A new random password is generated on every launch.")
+        print("  (Set RABBITHOLE_ADMIN_PASS to pin a fixed one instead.)")
+        print("=" * 64 + "\n", flush=True)
     else:
-        print(f"✅ Bootstrapped admin account '{ADMIN_USER}' from RABBITHOLE_ADMIN_PASS")
+        print(f"✅ Admin account '{ADMIN_USER}' set from RABBITHOLE_ADMIN_PASS", flush=True)
 
 
 def _seed_smtp_config():
@@ -1792,4 +1793,4 @@ init_db()
 if __name__ == '__main__':
     # threaded=True so the UI (campaign status polling, etc.) stays responsive
     # while background sender threads are running.
-    app.run(host='127.0.0.1', port=5001, threaded=True)
+    app.run(host='0.0.0.0', port=5001, threaded=True)

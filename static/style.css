@@ -273,7 +273,7 @@ textarea.form-control { resize: vertical; min-height: 120px; line-height: 1.6; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .rh-table { width: 100%; border-collapse: collapse; font-size: .875rem; }
