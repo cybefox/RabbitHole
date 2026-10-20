@@ -1155,6 +1155,7 @@ def import_users():
     if request.method == 'POST':
         file           = request.files.get('file')
         group_override = request.form.get('group_override', '').strip()
+        track_open     = 'yes' if request.form.get('track_open') else 'no'
 
         if file and file.filename and file.filename.lower().endswith('.csv'):
             filepath = os.path.join('uploads', secure_filename(file.filename))
@@ -1184,7 +1185,7 @@ def import_users():
                             'last_name':  (row.get('last_name') or '').strip(),
                             'email':      email,
                             'group':      group_override or (row.get('group') or '').strip(),
-                            'track_open': 'no',
+                            'track_open': track_open,
                         }
                         generate_link(user)
                         count += 1
