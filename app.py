@@ -442,14 +442,21 @@ def generate_link(user):
     return token, link
 
 
+def build_tracking_url(user_token, campaign, lp_id):
+    """Single place that assembles a /hit click URL, so every email-body link
+    goes through the same query-string logic (including &lp=<id>)."""
+    base = TRACKING_BASE_URL
+    params = f"uid={user_token}&c={quote(campaign or '')}"
+    if lp_id:
+        params += f"&lp={lp_id}"
+    return f"{base}/hit?{params}"
+
+
 def tracking_urls(token, campaign='', landing_id=None):
     """Build click and pixel URLs for a token, tagged with an optional campaign
     label so simultaneous templates can be told apart in the logs. When a landing
     page is set, the click URL carries &lp=<id> so /hit serves that page."""
-    suffix = f"&c={quote(campaign)}" if campaign else ""
-    if landing_id:
-        suffix += f"&lp={landing_id}"
-    link_url  = f"{TRACKING_BASE_URL}/hit?uid={token}{suffix}"
+    link_url  = build_tracking_url(token, campaign, landing_id)
     psuffix   = f"?c={quote(campaign)}" if campaign else ""
     pixel_url = f"{TRACKING_BASE_URL}/img/{token}.png{psuffix}"
     return link_url, pixel_url
