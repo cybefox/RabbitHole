@@ -1,2 +1,4 @@
 Flask==2.3.3
 psycopg2-binary>=2.9.0
+dnspython>=2.4.0
+requests>=2.31.0

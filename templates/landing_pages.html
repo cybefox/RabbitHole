@@ -55,8 +55,21 @@
       <div class="form-group">
         <label class="form-label">Page HTML</label>
         <p class="form-hint mb-2">
-          Use <code>{{ '{{form}}' }}</code> where the name/email form should appear.
-          Supports <code>{{ '{{first_name}}' }}</code>, <code>{{ '{{last_name}}' }}</code>, <code>{{ '{{email}}' }}</code>.
+          Victim info: <code>{{ '{{first_name}}' }}</code>, <code>{{ '{{last_name}}' }}</code>, <code>{{ '{{email}}' }}</code>.
+        </p>
+        <p class="form-hint mb-2">
+          Quick form: <code>{{ '{{form}}' }}</code> drops the whole capture form (name, email, plus any
+          extra fields enabled below) in one place.
+        </p>
+        <p class="form-hint mb-2">
+          Or build your own layout with individual tags — each extra field tag renders empty if that
+          field isn't enabled below:<br>
+          <code>{{ '{{form_start}}' }}</code> … <code>{{ '{{name_field}}' }}</code> ·
+          <code>{{ '{{email_field}}' }}</code> ·
+          <code>{{ '{{phone_field}}' }}</code> ·
+          <code>{{ '{{id_field}}' }}</code> ·
+          <code>{{ '{{comment_field}}' }}</code> …
+          <code>{{ '{{submit_button}}' }}</code> … <code>{{ '{{form_end}}' }}</code>
         </p>
         <textarea name="html" id="f_html" class="form-control" rows="14"
                   style="font-family:monospace;font-size:.8rem;">{{ default_html }}</textarea>
@@ -66,6 +79,39 @@
         <textarea name="thankyou" id="f_thankyou" class="form-control" rows="3"
                   style="font-family:monospace;font-size:.8rem;" placeholder="Thank you. Your information has been received."></textarea>
       </div>
+
+      <div class="form-group">
+        <label class="form-label">Extra Capture Fields <span class="text-muted text-sm">(in addition to name &amp; email)</span></label>
+        <div class="grid-2">
+          <div>
+            <label class="form-check">
+              <input type="checkbox" class="form-check-input" name="capture_phone" id="f_capture_phone">
+              <span class="form-check-label">Phone number</span>
+            </label>
+          </div>
+          <div></div>
+          <div>
+            <label class="form-check">
+              <input type="checkbox" class="form-check-input" name="capture_id" id="f_capture_id" onchange="toggleIdLabel()">
+              <span class="form-check-label">Employee / Student ID</span>
+            </label>
+          </div>
+          <div class="form-group" id="idLabelWrap" style="display:none;margin:0;">
+            <input type="text" name="id_label" id="f_id_label" class="form-control" placeholder="Field label, e.g. Employee ID">
+          </div>
+          <div>
+            <label class="form-check">
+              <input type="checkbox" class="form-check-input" name="capture_comment" id="f_capture_comment" onchange="toggleCommentLabel()">
+              <span class="form-check-label">General comment</span>
+            </label>
+          </div>
+          <div class="form-group" id="commentLabelWrap" style="display:none;margin:0;">
+            <input type="text" name="comment_label" id="f_comment_label" class="form-control"
+                   placeholder="Prompt, e.g. Why should you win the lucky draw?">
+          </div>
+        </div>
+      </div>
+
       <div class="input-row mt-3">
         <button type="submit" class="btn btn-primary">Save Page</button>
         <button type="button" class="btn btn-outline" onclick="resetForm()">Clear</button>
@@ -84,12 +130,29 @@ function editPage(p) {
   document.getElementById('f_name').value = p.name || '';
   document.getElementById('f_html').value = p.html || '';
   document.getElementById('f_thankyou').value = p.thankyou || '';
+  document.getElementById('f_capture_phone').checked = !!p.capture_phone;
+  document.getElementById('f_capture_id').checked = !!p.capture_id;
+  document.getElementById('f_id_label').value = p.id_label || '';
+  document.getElementById('f_capture_comment').checked = !!p.capture_comment;
+  document.getElementById('f_comment_label').value = p.comment_label || '';
+  toggleIdLabel();
+  toggleCommentLabel();
   window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 }
 function resetForm() {
   document.getElementById('formTitle').textContent = 'Add Page';
   document.querySelector('form[action="/landing-pages/save"]').reset();
   document.getElementById('f_id').value = '';
+  toggleIdLabel();
+  toggleCommentLabel();
+}
+function toggleIdLabel() {
+  document.getElementById('idLabelWrap').style.display =
+    document.getElementById('f_capture_id').checked ? '' : 'none';
+}
+function toggleCommentLabel() {
+  document.getElementById('commentLabelWrap').style.display =
+    document.getElementById('f_capture_comment').checked ? '' : 'none';
 }
 </script>
 {% endblock %}

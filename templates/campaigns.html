@@ -10,6 +10,7 @@
       <p>Background send jobs — several can run at the same time</p>
     </div>
     <div class="flex gap-2">
+      <button id="bulkDeleteBtn" class="btn btn-danger btn-sm" style="display:none;" onclick="bulkDelete()">Delete Selected (<span id="bulkCount">0</span>)</button>
       <a href="/email-template" class="btn btn-primary btn-sm">+ New Campaign</a>
       <span id="live" class="text-xs text-muted" style="align-self:center;">live</span>
     </div>
@@ -19,6 +20,7 @@
     <table class="rh-table" id="campaignTable">
       <thead>
         <tr>
+          <th style="width:2rem;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
           <th>Campaign</th>
           <th>SMTP</th>
           <th>Status</th>
@@ -30,7 +32,7 @@
         </tr>
       </thead>
       <tbody>
-        <tr><td colspan="8" class="text-muted">Loading…</td></tr>
+        <tr><td colspan="9" class="text-muted">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -60,6 +62,8 @@ function esc(s) {
     ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
 }
 
+const selectedIds = new Set();
+
 function row(c) {
   const pct = c.total ? Math.round((c.sent + c.failed) * 100 / c.total) : 0;
   const badge = STATUS_BADGE[c.status] || '';
@@ -75,7 +79,12 @@ function row(c) {
                  <button class="btn btn-outline btn-sm" type="submit">Delete</button></form>`;
   }
   const err = c.last_error ? `<div class="text-xs" style="color:var(--danger);">${esc(c.last_error)}</div>` : '';
+  const checked = selectedIds.has(String(c.id)) ? 'checked' : '';
+  const checkbox = live
+    ? `<input type="checkbox" disabled title="Running campaigns can't be deleted">`
+    : `<input type="checkbox" class="rowCheck" value="${c.id}" ${checked} onchange="onRowCheck(this)">`;
   return `<tr>
+    <td>${checkbox}</td>
     <td><a href="/campaigns/${c.id}"><strong>${esc(c.name)}</strong></a><div class="text-xs text-muted">${esc(c.subject)}</div>${err}</td>
     <td class="text-sm">${esc(c.smtp_name)}</td>
     <td><span class="badge ${badge}">${esc(c.status)}</span></td>
@@ -93,10 +102,15 @@ function row(c) {
 async function refresh() {
   try {
     const { campaigns } = await fetch('/api/campaign-status').then(r => r.json());
+    // Drop selections for campaigns that no longer exist or are now running.
+    const stillSelectable = new Set(campaigns.filter(c => c.status !== 'running' && c.status !== 'stopping').map(c => String(c.id)));
+    [...selectedIds].forEach(id => { if (!stillSelectable.has(id)) selectedIds.delete(id); });
+
     const body = campaigns.length
       ? campaigns.map(row).join('')
-      : '<tr><td colspan="8" class="text-muted">No campaigns yet. Launch one from the Email page.</td></tr>';
+      : '<tr><td colspan="9" class="text-muted">No campaigns yet. Launch one from the Email page.</td></tr>';
     document.querySelector('#campaignTable tbody').innerHTML = body;
+    updateBulkUI();
   } catch (e) { /* keep last view on transient error */ }
 }
 
@@ -104,6 +118,45 @@ function stopCampaign(id) {
   if (!confirm('Stop this campaign? Already-sent emails cannot be recalled.')) return;
   const data = new URLSearchParams({ id });
   fetch('/campaigns/stop', { method: 'POST', body: data }).then(refresh);
+}
+
+function onRowCheck(el) {
+  if (el.checked) selectedIds.add(el.value);
+  else selectedIds.delete(el.value);
+  updateBulkUI();
+}
+
+function toggleSelectAll(checked) {
+  document.querySelectorAll('#campaignTable .rowCheck').forEach(cb => {
+    cb.checked = checked;
+    if (checked) selectedIds.add(cb.value);
+    else selectedIds.delete(cb.value);
+  });
+  updateBulkUI();
+}
+
+function updateBulkUI() {
+  const n = selectedIds.size;
+  document.getElementById('bulkCount').textContent = n;
+  document.getElementById('bulkDeleteBtn').style.display = n ? 'inline-block' : 'none';
+  const boxes = document.querySelectorAll('#campaignTable .rowCheck');
+  document.getElementById('selectAll').checked = boxes.length > 0 && [...boxes].every(b => b.checked);
+}
+
+async function bulkDelete() {
+  const ids = [...selectedIds];
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} campaign record${ids.length > 1 ? 's' : ''}? This cannot be undone.`)) return;
+
+  const res = await fetch('/campaigns/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  }).then(r => r.json());
+
+  selectedIds.clear();
+  if (res.skipped) alert(`${res.skipped} campaign(s) were skipped because they're still running.`);
+  refresh();
 }
 
 refresh();

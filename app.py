@@ -14,6 +14,8 @@ from email.mime.multipart import MIMEMultipart
 import psycopg2
 import psycopg2.extras
 
+import scanner_detect
+
 app = Flask(__name__)
 # Secrets/config come from the environment; the fallbacks keep local dev working
 # but SHOULD be overridden in any real deployment.
@@ -54,6 +56,12 @@ _TEMPLATES_FILE = "email_templates.json"
 
 def _utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _show_scanner_hits():
+    """Opt-in query flag (?show_scanner=1) to include flagged scanner/bot
+    hits in telemetry views, instead of filtering them out by default."""
+    return request.args.get("show_scanner") in ("1", "true", "yes")
 
 
 @contextmanager
@@ -134,6 +142,13 @@ def init_db():
             cur.execute("ALTER TABLE clicks    ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
             cur.execute("ALTER TABLE opens     ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
             cur.execute("ALTER TABLE email_log ADD COLUMN IF NOT EXISTS campaign TEXT NOT NULL DEFAULT ''")
+            # Security-scanner detection (Microsoft Safe Links, Zscaler, Proofpoint, ...)
+            # — these pre-fetch tracking links/pixels before a human ever sees the email,
+            # so they're flagged here and excluded from "real" telemetry by default.
+            for _tbl in ("clicks", "opens"):
+                cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS is_scanner BOOLEAN NOT NULL DEFAULT FALSE")
+                cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS scanner_vendor TEXT NOT NULL DEFAULT ''")
+                cur.execute(f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS scanner_reason TEXT NOT NULL DEFAULT ''")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS campaigns (
                     id             SERIAL PRIMARY KEY,
@@ -163,6 +178,13 @@ def init_db():
                     created_at TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Extra capture fields — added idempotently so landing pages created
+            # before this feature default to "off" and keep their old name/email-only form.
+            cur.execute("ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS capture_phone   BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS capture_id      BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS id_label        TEXT NOT NULL DEFAULT 'Employee / Student ID'")
+            cur.execute("ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS capture_comment BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE landing_pages ADD COLUMN IF NOT EXISTS comment_label   TEXT NOT NULL DEFAULT 'Comment'")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS accounts (
                     id            SERIAL PRIMARY KEY,
@@ -186,6 +208,12 @@ def init_db():
                     timestamp  TEXT NOT NULL DEFAULT ''
                 )
             """)
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS phone    TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS id_value TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS comment  TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS is_scanner BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS scanner_vendor TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE submissions ADD COLUMN IF NOT EXISTS scanner_reason TEXT NOT NULL DEFAULT ''")
             # Any campaigns left 'running' from a previous process are stale —
             # a worker thread does not survive a restart, so mark them interrupted.
             cur.execute("""
@@ -563,27 +591,80 @@ def get_landing_page(lp_id):
             return dict(row) if row else None
 
 
-def _landing_form_html(token, campaign, lp_id):
-    """The injected name/email capture form. Inline-styled so it renders inside
-    arbitrary admin HTML. Posts to /submit with hidden tracking fields."""
-    return f"""<form method="POST" action="/submit" style="margin-top:16px;">
-  <input type="hidden" name="token" value="{html_escape(token or '')}">
-  <input type="hidden" name="campaign" value="{html_escape(campaign or '')}">
-  <input type="hidden" name="lp" value="{html_escape(str(lp_id or ''))}">
+def _field_html(kind, lp):
+    """One capture <input>/<textarea> block, inline-styled. Returns '' for an
+    optional field that hasn't been turned on for this landing page."""
+    lp = lp or {}
+    if kind == 'name':
+        return """
   <div style="margin-bottom:12px;">
     <label style="display:block;margin-bottom:4px;">Full name</label>
     <input type="text" name="name" required
            style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
-  </div>
+  </div>"""
+    if kind == 'email':
+        return """
   <div style="margin-bottom:16px;">
     <label style="display:block;margin-bottom:4px;">Email</label>
     <input type="email" name="email" required
            style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
-  </div>
+  </div>"""
+    if kind == 'phone':
+        if not lp.get('capture_phone'):
+            return ''
+        return """
+  <div style="margin-bottom:16px;">
+    <label style="display:block;margin-bottom:4px;">Phone number</label>
+    <input type="tel" name="phone"
+           style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
+  </div>"""
+    if kind == 'id':
+        if not lp.get('capture_id'):
+            return ''
+        id_label = html_escape(lp.get('id_label') or 'ID')
+        return f"""
+  <div style="margin-bottom:16px;">
+    <label style="display:block;margin-bottom:4px;">{id_label}</label>
+    <input type="text" name="id_value"
+           style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;">
+  </div>"""
+    if kind == 'comment':
+        if not lp.get('capture_comment'):
+            return ''
+        comment_label = html_escape(lp.get('comment_label') or 'Comment')
+        return f"""
+  <div style="margin-bottom:16px;">
+    <label style="display:block;margin-bottom:4px;">{comment_label}</label>
+    <textarea name="comment" rows="3"
+           style="width:100%;padding:10px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;"></textarea>
+  </div>"""
+    return ''
+
+
+def _form_open_html(token, campaign, lp):
+    """<form> tag plus the hidden tracking inputs. Pair with {{form_end}}."""
+    lp = lp or {}
+    return f"""<form method="POST" action="/submit" style="margin-top:16px;">
+  <input type="hidden" name="token" value="{html_escape(token or '')}">
+  <input type="hidden" name="campaign" value="{html_escape(campaign or '')}">
+  <input type="hidden" name="lp" value="{html_escape(str(lp.get('id') or ''))}">"""
+
+
+def _submit_button_html():
+    return """
   <button type="submit"
           style="width:100%;padding:11px;background:#2563eb;color:#fff;border:none;
-                 border-radius:4px;font-size:15px;cursor:pointer;">Continue</button>
-</form>"""
+                 border-radius:4px;font-size:15px;cursor:pointer;">Continue</button>"""
+
+
+def _landing_form_html(token, campaign, lp):
+    """All-in-one convenience form: name/email plus whichever optional fields
+    the landing page has turned on. Equivalent to combining {{form_start}},
+    the individual {{..._field}} tags, {{submit_button}} and {{form_end}}."""
+    lp = lp or {}
+    body = (_field_html('name', lp) + _field_html('email', lp)
+            + _field_html('phone', lp) + _field_html('id', lp) + _field_html('comment', lp))
+    return _form_open_html(token, campaign, lp) + body + _submit_button_html() + "\n</form>"
 
 
 def render_landing(lp, user, token, campaign):
@@ -595,7 +676,15 @@ def render_landing(lp, user, token, campaign):
                 .replace("{{first_name}}", html_escape(u.get('first_name', '')))
                 .replace("{{last_name}}",  html_escape(u.get('last_name', '')))
                 .replace("{{email}}",      html_escape(u.get('email', '')))
-                .replace("{{form}}",       _landing_form_html(token, campaign, lp.get('id'))))
+                .replace("{{form_start}}",    _form_open_html(token, campaign, lp))
+                .replace("{{form_end}}",      "</form>")
+                .replace("{{submit_button}}", _submit_button_html())
+                .replace("{{name_field}}",    _field_html('name', lp))
+                .replace("{{email_field}}",   _field_html('email', lp))
+                .replace("{{phone_field}}",   _field_html('phone', lp))
+                .replace("{{id_field}}",      _field_html('id', lp))
+                .replace("{{comment_field}}", _field_html('comment', lp))
+                .replace("{{form}}",       _landing_form_html(token, campaign, lp)))
     return html_out
 
 
@@ -714,7 +803,65 @@ def generate():
 @app.route('/users')
 @login_required
 def users():
-    return render_template('users.html', users=load_users())
+    all_users = load_users()
+    groups = sorted({u['group'] for u in all_users if u.get('group')})
+    return render_template('users.html', users=all_users, groups=groups)
+
+
+@app.route('/users/edit', methods=['POST'])
+@role_required('operator')
+def edit_user():
+    f = request.form
+    orig_username = f.get('orig_username', '').strip()
+    username      = f.get('username', '').strip()
+    first_name    = f.get('first_name', '').strip()
+    last_name     = f.get('last_name', '').strip()
+    email         = f.get('email', '').strip()
+    group         = f.get('group', '').strip()
+    track_open    = 'yes' if f.get('track_open') else 'no'
+
+    if not orig_username or not username or not email:
+        return jsonify({'status': 'error', 'message': 'Username and email are required'}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE username = %s", (orig_username,))
+            if not cur.fetchone():
+                return jsonify({'status': 'error', 'message': 'User not found'}), 404
+            if username != orig_username:
+                cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+                if cur.fetchone():
+                    return jsonify({'status': 'error', 'message': 'That username is already taken'}), 400
+            cur.execute("""
+                UPDATE users SET username=%s, first_name=%s, last_name=%s, email=%s, grp=%s, track_open=%s
+                 WHERE username=%s
+            """, (username, first_name, last_name, email, group, track_open, orig_username))
+    return redirect(url_for('users'))
+
+
+@app.route('/users/delete', methods=['POST'])
+@role_required('operator')
+def delete_user():
+    username = request.form.get('username', '').strip()
+    if username:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM users WHERE username = %s", (username,))
+    return redirect(url_for('users'))
+
+
+@app.route('/users/bulk-delete', methods=['POST'])
+@role_required('operator')
+def bulk_delete_users():
+    usernames = [u.strip() for u in request.form.getlist('usernames') if u.strip()]
+    group     = request.form.get('group', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if group:
+                cur.execute("DELETE FROM users WHERE grp = %s", (group,))
+            elif usernames:
+                cur.execute("DELETE FROM users WHERE username = ANY(%s)", (usernames,))
+    return redirect(url_for('users'))
 
 
 @app.route('/users.csv')
@@ -743,10 +890,13 @@ def hit():
     if ',' in ip:
         ip = ip.split(',')[0].strip()
     ts = _utcnow()
+    scan = scanner_detect.classify(ip, request.headers.get("User-Agent", ""))
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO clicks (token, timestamp, ip, campaign) VALUES (%s,%s,%s,%s)",
-                        (token, ts, ip, campaign))
+            cur.execute("""
+                INSERT INTO clicks (token, timestamp, ip, campaign, is_scanner, scanner_vendor, scanner_reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (token, ts, ip, campaign, scan["is_scanner"], scan["vendor"] or "", scan["reason"]))
 
     # If this link carries a landing page, serve it (with a capture form);
     # otherwise fall back to the configured external redirect.
@@ -766,10 +916,13 @@ def img(uid):
     if ',' in ip:
         ip = ip.split(',')[0].strip()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    scan = scanner_detect.classify(ip, request.headers.get("User-Agent", ""))
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO opens (token, timestamp, ip, campaign) VALUES (%s,%s,%s,%s)",
-                        (uid, ts, ip, campaign))
+            cur.execute("""
+                INSERT INTO opens (token, timestamp, ip, campaign, is_scanner, scanner_vendor, scanner_reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """, (uid, ts, ip, campaign, scan["is_scanner"], scan["vendor"] or "", scan["reason"]))
     return send_file(os.path.join(app.root_path, "static", "pixel.png"), mimetype='image/png')
 
 
@@ -782,16 +935,22 @@ def submit():
     lp_id    = request.form.get("lp", "") or None
     name     = request.form.get("name", "").strip()
     email    = request.form.get("email", "").strip()
+    phone    = request.form.get("phone", "").strip()
+    id_value = request.form.get("id_value", "").strip()
+    comment  = request.form.get("comment", "").strip()
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if ',' in ip:
         ip = ip.split(',')[0].strip()
+    scan = scanner_detect.classify(ip, request.headers.get("User-Agent", ""))
 
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO submissions (token, campaign, landing_id, name, email, ip, timestamp)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-            """, (token, campaign, lp_id, name, email, ip, _utcnow()))
+                INSERT INTO submissions (token, campaign, landing_id, name, email, phone, id_value, comment, ip, timestamp,
+                                          is_scanner, scanner_vendor, scanner_reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (token, campaign, lp_id, name, email, phone, id_value, comment, ip, _utcnow(),
+                  scan["is_scanner"], scan["vendor"] or "", scan["reason"]))
 
     lp = get_landing_page(lp_id) if lp_id else None
     message = (lp.get('thankyou') if lp and lp.get('thankyou')
@@ -815,6 +974,8 @@ def submit():
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    show_scanner = _show_scanner_hits()
+    scanner_filter = "" if show_scanner else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -824,17 +985,31 @@ def dashboard():
             """)
             all_users = [dict(r) for r in cur.fetchall()]
 
-            cur.execute("SELECT token, timestamp, ip FROM clicks ORDER BY timestamp")
+            cur.execute(f"SELECT token, timestamp, ip FROM clicks {scanner_filter} ORDER BY timestamp")
             click_rows = cur.fetchall()
 
-            cur.execute("SELECT COUNT(DISTINCT token) AS cnt FROM opens")
+            cur.execute(f"SELECT COUNT(DISTINCT token) AS cnt FROM opens {scanner_filter}")
             opens_count = cur.fetchone()['cnt']
 
-            cur.execute("SELECT COUNT(DISTINCT token) AS cnt FROM clicks")
+            cur.execute(f"SELECT COUNT(DISTINCT token) AS cnt FROM clicks {scanner_filter}")
             clicks_count = cur.fetchone()['cnt']
 
             cur.execute("SELECT COUNT(DISTINCT LOWER(email)) AS cnt FROM email_log")
             sent_count = cur.fetchone()['cnt']
+
+            cur.execute(f"SELECT COUNT(DISTINCT token) AS cnt FROM submissions {scanner_filter}")
+            submissions_count = cur.fetchone()['cnt']
+
+            cur.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM clicks      WHERE is_scanner) +
+                    (SELECT COUNT(*) FROM opens        WHERE is_scanner) +
+                    (SELECT COUNT(*) FROM submissions  WHERE is_scanner) AS cnt
+            """)
+            scanner_filtered = cur.fetchone()['cnt']
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM clicks WHERE is_scanner")
+            bot_clicks_count = cur.fetchone()['cnt']
 
     user_map = {u['token']: u for u in all_users}
     enriched_clicks = []
@@ -850,11 +1025,14 @@ def dashboard():
         'emails_sent':   sent_count,
         'emails_opened': opens_count,
         'links_clicked': clicks_count,
+        'submissions':   submissions_count,
+        'bot_clicks':    bot_clicks_count,
     }
     email_pending = max(0, len(all_users) - sent_count)
 
     return render_template('dashboard.html', clicks=enriched_clicks, stats=stats,
-                           email_sent=sent_count, email_pending=email_pending)
+                           email_sent=sent_count, email_pending=email_pending,
+                           show_scanner=show_scanner, scanner_filtered=scanner_filtered)
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -862,14 +1040,16 @@ def dashboard():
 @app.route('/api/clicks')
 @login_required
 def api_clicks():
+    scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT c.token, c.timestamp, c.ip,
+            cur.execute(f"""
+                SELECT c.token, c.timestamp, c.ip, c.is_scanner, c.scanner_vendor,
                        u.first_name, u.last_name, u.email, u.grp AS "group"
                 FROM (
-                    SELECT DISTINCT ON (token) token, timestamp, ip
+                    SELECT DISTINCT ON (token) token, timestamp, ip, is_scanner, scanner_vendor
                     FROM clicks
+                    {scanner_filter}
                     ORDER BY token, timestamp DESC
                 ) c
                 LEFT JOIN users u ON u.token = c.token
@@ -878,12 +1058,39 @@ def api_clicks():
     return jsonify({'clicks': rows})
 
 
-@app.route('/api/repeats')
+@app.route('/api/bot-clicks')
 @login_required
-def api_repeats():
+def api_bot_clicks():
+    """Every click flagged as an automated scanner hit, independent of the
+    show_scanner toggle — this is the dedicated bot-review view."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
+                SELECT c.token, c.timestamp, c.ip, c.campaign, c.scanner_vendor, c.scanner_reason,
+                       u.first_name, u.last_name, u.email, u.grp AS "group"
+                FROM clicks c
+                LEFT JOIN users u ON u.token = c.token
+                WHERE c.is_scanner = TRUE
+                ORDER BY c.timestamp DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT scanner_vendor, COUNT(*) AS cnt
+                FROM clicks WHERE is_scanner = TRUE
+                GROUP BY scanner_vendor ORDER BY cnt DESC
+            """)
+            by_vendor = [dict(r) for r in cur.fetchall()]
+    return jsonify({'bot_clicks': rows, 'by_vendor': by_vendor})
+
+
+@app.route('/api/repeats')
+@login_required
+def api_repeats():
+    scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
                 SELECT c.token,
                        COUNT(*) AS clicks,
                        MIN(c.timestamp) AS first_click,
@@ -892,6 +1099,7 @@ def api_repeats():
                        u.first_name, u.last_name, u.email, u.grp AS "group"
                 FROM clicks c
                 LEFT JOIN users u ON u.token = c.token
+                {scanner_filter}
                 GROUP BY c.token, u.first_name, u.last_name, u.email, u.grp
                 HAVING COUNT(*) > 1
             """)
@@ -904,6 +1112,7 @@ def api_repeats():
 def api_campaigns():
     """Per-campaign (per-template) breakdown so several templates running at
     once can be compared side by side."""
+    scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -912,17 +1121,17 @@ def api_campaigns():
             """)
             sent = {r['campaign']: r['cnt'] for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT campaign, COUNT(DISTINCT token) AS cnt
-                FROM opens GROUP BY campaign
+                FROM opens {scanner_filter} GROUP BY campaign
             """)
             opened = {r['campaign']: r['cnt'] for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT campaign,
                        COUNT(DISTINCT token) AS unique_clicks,
                        COUNT(*) AS total_clicks
-                FROM clicks GROUP BY campaign
+                FROM clicks {scanner_filter} GROUP BY campaign
             """)
             clicked = {r['campaign']: dict(r) for r in cur.fetchall()}
 
@@ -947,25 +1156,36 @@ def api_campaigns():
 @app.route('/api/repeat-offenders')
 @login_required
 def api_repeat_offenders():
-    """Users who 'failed' (clicked the lure) in more than one distinct campaign —
-    the repeat offenders worth prioritising for awareness training."""
+    """Users worth prioritising for awareness training: either they clicked the
+    SAME link/campaign more than once, or they clicked the lure across more than
+    one distinct campaign."""
+    scanner_clause = "" if _show_scanner_hits() else "AND c.is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT c.token,
-                       u.first_name, u.last_name, u.email, u.grp AS "group",
-                       COUNT(DISTINCT c.campaign) AS campaigns_failed,
-                       COUNT(*)                   AS total_clicks,
-                       STRING_AGG(DISTINCT c.campaign, ', ') AS campaigns,
-                       MIN(c.timestamp) AS first_click,
-                       MAX(c.timestamp) AS last_click,
-                       STRING_AGG(DISTINCT c.ip, ', ') AS ips
-                FROM clicks c
-                LEFT JOIN users u ON u.token = c.token
-                WHERE c.campaign <> ''
-                GROUP BY c.token, u.first_name, u.last_name, u.email, u.grp
-                HAVING COUNT(DISTINCT c.campaign) > 1
-                ORDER BY campaigns_failed DESC, total_clicks DESC
+            cur.execute(f"""
+                SELECT token, first_name, last_name, email, "group",
+                       COUNT(DISTINCT campaign)          AS campaigns_failed,
+                       SUM(cnt)                           AS total_clicks,
+                       MAX(cnt)                            AS max_same_link_clicks,
+                       STRING_AGG(DISTINCT campaign, ', ') AS campaigns,
+                       MIN(first_click)                    AS first_click,
+                       MAX(last_click)                     AS last_click,
+                       STRING_AGG(DISTINCT ips, ', ')      AS ips
+                FROM (
+                    SELECT c.token, c.campaign,
+                           COUNT(*)                       AS cnt,
+                           MIN(c.timestamp)                AS first_click,
+                           MAX(c.timestamp)                AS last_click,
+                           STRING_AGG(DISTINCT c.ip, ', ')  AS ips,
+                           u.first_name, u.last_name, u.email, u.grp AS "group"
+                    FROM clicks c
+                    LEFT JOIN users u ON u.token = c.token
+                    WHERE c.campaign <> '' {scanner_clause}
+                    GROUP BY c.token, c.campaign, u.first_name, u.last_name, u.email, u.grp
+                ) per_campaign
+                GROUP BY token, first_name, last_name, email, "group"
+                HAVING COUNT(DISTINCT campaign) > 1 OR MAX(cnt) > 1
+                ORDER BY max_same_link_clicks DESC, campaigns_failed DESC, total_clicks DESC
             """)
             rows = [dict(r) for r in cur.fetchall()]
     return jsonify({'offenders': rows})
@@ -982,17 +1202,79 @@ def telemetry():
 @app.route('/submissions')
 @login_required
 def submissions():
+    show_scanner = _show_scanner_hits()
+    scanner_clause = "" if show_scanner else "WHERE s.is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT s.name, s.email, s.campaign, s.ip, s.timestamp,
-                       u.grp AS "group"
+            cur.execute(f"""
+                SELECT s.id, s.name AS sub_name, s.email AS sub_email,
+                       s.phone, s.id_value, s.comment, s.campaign, s.ip,
+                       s.timestamp::text AS timestamp, s.token,
+                       s.is_scanner, s.scanner_vendor,
+                       u.username, u.first_name, u.last_name,
+                       u.email AS victim_email, u.grp AS "group",
+                       lp.name AS landing_name
                 FROM submissions s
-                LEFT JOIN users u ON u.token = s.token
+                LEFT JOIN users u          ON u.token  = s.token
+                LEFT JOIN landing_pages lp ON lp.id    = s.landing_id
+                {scanner_clause}
                 ORDER BY s.timestamp DESC
             """)
             rows = [dict(r) for r in cur.fetchall()]
-    return render_template("submissions.html", submissions=rows)
+
+    # Group by victim (token); anonymous subs keyed by submission id
+    victims = {}
+    for r in rows:
+        key = r.get('token') or f"__anon_{r['id']}"
+        ve = (r.get('victim_email') or '').strip().lower()
+        se = (r.get('sub_email') or '').strip().lower()
+        email_match = bool(ve and se and ve == se)
+
+        if key not in victims:
+            victims[key] = {
+                'token': r.get('token'),
+                'username': r.get('username') or '—',
+                'victim_name': (f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip() or None),
+                'victim_email': r.get('victim_email'),
+                'group': r.get('group'),
+                'timestamps': [],
+                'ips': [],
+                'campaigns': [],
+                'has_match': False,
+                'has_scanner': False,
+                'submissions': [],
+            }
+
+        v = victims[key]
+        ts  = str(r.get('timestamp') or '')
+        ip  = str(r.get('ip') or '')
+        cam = str(r.get('campaign') or '')
+
+        if ts  and ts  not in v['timestamps']: v['timestamps'].append(ts)
+        if ip  and ip  not in v['ips']:        v['ips'].append(ip)
+        if cam and cam not in v['campaigns']:  v['campaigns'].append(cam)
+        if email_match:
+            v['has_match'] = True
+
+        v['submissions'].append({
+            'sub_name':    r.get('sub_name'),
+            'sub_email':   r.get('sub_email'),
+            'phone':       r.get('phone'),
+            'id_value':    r.get('id_value'),
+            'comment':     r.get('comment'),
+            'campaign':    r.get('campaign'),
+            'landing_name': r.get('landing_name'),
+            'ip':          r.get('ip'),
+            'timestamp':   ts,
+            'email_match': email_match,
+            'is_scanner':  r.get('is_scanner', False),
+            'scanner_vendor': r.get('scanner_vendor', ''),
+        })
+        if r.get('is_scanner'):
+            v['has_scanner'] = True
+
+    victim_list = list(victims.values())
+    return render_template("submissions.html", victims=victim_list, show_scanner=show_scanner)
 
 
 # ── Account management (admin) ──────────────────────────────────────────────────
@@ -1106,6 +1388,7 @@ def change_password():
 @app.route('/report')
 @login_required
 def report():
+    scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1118,11 +1401,11 @@ def report():
             cur.execute("SELECT DISTINCT LOWER(email) AS email FROM email_log")
             sent_emails = {r['email'] for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT token,
                        COUNT(*) AS total_clicks,
                        STRING_AGG(DISTINCT ip, ', ') AS ips
-                FROM clicks
+                FROM clicks {scanner_filter}
                 GROUP BY token
             """)
             click_agg = {r['token']: dict(r) for r in cur.fetchall()}
@@ -1370,17 +1653,29 @@ def save_landing_page():
     name = f.get('name', '').strip()
     if not name:
         return jsonify({'status': 'error', 'message': 'Name is required'}), 400
-    lp_id = f.get('id', '').strip()
-    values = (name, f.get('html', ''), f.get('thankyou', ''))
+    lp_id           = f.get('id', '').strip()
+    capture_phone   = f.get('capture_phone') == 'on'
+    capture_id      = f.get('capture_id') == 'on'
+    id_label        = f.get('id_label', '').strip() or 'Employee / Student ID'
+    capture_comment = f.get('capture_comment') == 'on'
+    comment_label   = f.get('comment_label', '').strip() or 'Comment'
+    values = (name, f.get('html', ''), f.get('thankyou', ''),
+              capture_phone, capture_id, id_label, capture_comment, comment_label)
     with get_db() as conn:
         with conn.cursor() as cur:
             if lp_id:
-                cur.execute("UPDATE landing_pages SET name=%s, html=%s, thankyou=%s WHERE id=%s",
-                            values + (lp_id,))
+                cur.execute("""
+                    UPDATE landing_pages
+                       SET name=%s, html=%s, thankyou=%s,
+                           capture_phone=%s, capture_id=%s, id_label=%s,
+                           capture_comment=%s, comment_label=%s
+                     WHERE id=%s
+                """, values + (lp_id,))
             else:
                 cur.execute("""
-                    INSERT INTO landing_pages (name, html, thankyou, created_at)
-                    VALUES (%s,%s,%s,%s)
+                    INSERT INTO landing_pages (name, html, thankyou,
+                        capture_phone, capture_id, id_label, capture_comment, comment_label, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, values + (_utcnow(),))
     return redirect(url_for('landing_pages'))
 
@@ -1637,6 +1932,7 @@ def campaign_detail(cid):
 def api_campaign_detail(cid):
     """Per-recipient breakdown for one campaign: sent / opened / clicked,
     joined on the campaign's tracking label."""
+    scanner_clause = "" if _show_scanner_hits() else "AND is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
@@ -1659,22 +1955,22 @@ def api_campaign_detail(cid):
             """)
             by_username = {r['username']: dict(r) for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT token, COUNT(*) AS opens, MIN(timestamp) AS first_open
-                FROM opens WHERE campaign = %s GROUP BY token
+                FROM opens WHERE campaign = %s {scanner_clause} GROUP BY token
             """, (label,))
             opens_by_token = {r['token']: dict(r) for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT token, COUNT(*) AS clicks, MAX(timestamp) AS last_click,
                        STRING_AGG(DISTINCT ip, ', ') AS ips
-                FROM clicks WHERE campaign = %s GROUP BY token
+                FROM clicks WHERE campaign = %s {scanner_clause} GROUP BY token
             """, (label,))
             clicks_by_token = {r['token']: dict(r) for r in cur.fetchall()}
 
-            cur.execute("""
+            cur.execute(f"""
                 SELECT token, COUNT(*) AS subs, MAX(timestamp) AS last_submit
-                FROM submissions WHERE campaign = %s GROUP BY token
+                FROM submissions WHERE campaign = %s {scanner_clause} GROUP BY token
             """, (label,))
             subs_by_token = {r['token']: dict(r) for r in cur.fetchall()}
 
@@ -1748,6 +2044,30 @@ def delete_campaign():
             # Don't delete a live job out from under its worker.
             cur.execute("DELETE FROM campaigns WHERE id = %s AND status <> 'running'", (cid,))
     return redirect(url_for('campaigns'))
+
+
+@app.route('/campaigns/bulk-delete', methods=['POST'])
+@role_required('operator')
+def bulk_delete_campaigns():
+    """Delete several campaign records at once. Running campaigns are always
+    skipped (same guard as the single-delete route) so a bulk click can never
+    pull a live send out from under its worker thread."""
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get('ids') or request.form.getlist('ids')
+    ids = [int(i) for i in (str(x).strip() for x in raw_ids) if i.isdigit()]
+    if not ids:
+        return jsonify({'status': 'error', 'message': 'No campaign ids given'}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM campaigns WHERE id = ANY(%s) AND status <> 'running'
+                RETURNING id
+            """, (ids,))
+            deleted_ids = [r['id'] for r in cur.fetchall()]
+
+    skipped = len(ids) - len(deleted_ids)
+    return jsonify({'status': 'success', 'deleted': deleted_ids, 'skipped': skipped})
 
 
 # ── Sent status ───────────────────────────────────────────────────────────────

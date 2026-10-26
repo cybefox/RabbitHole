@@ -20,21 +20,39 @@
     <a href="/import" class="btn btn-primary btn-sm">+ Import</a>
   </div>
 
+  <div class="input-row mb-2" style="justify-content:space-between;">
+    <div class="input-row">
+      <button class="btn btn-danger btn-sm" type="button" onclick="deleteSelected()">🗑 Delete Selected</button>
+    </div>
+    <div class="input-row">
+      <select class="form-select form-select-sm" id="groupSelect" style="width:auto;">
+        <option value="">Delete by group…</option>
+        {% for g in groups %}
+        <option value="{{ g }}">{{ g }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn-danger btn-sm" type="button" onclick="deleteByGroup()">Delete Group</button>
+    </div>
+  </div>
+
   <div class="table-wrap">
     <table class="rh-table" id="usersTable">
       <thead>
         <tr>
+          <th><input type="checkbox" id="selectAll" onclick="toggleAll(this)"></th>
           <th>Username</th>
           <th>Full Name</th>
           <th>Email</th>
           <th>Group</th>
           <th>Pixel</th>
           <th>Link</th>
+          <th style="text-align:right;">Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for u in users %}
         <tr>
+          <td><input type="checkbox" class="user-chk" value="{{ u.username }}"></td>
           <td>{{ u.username }}</td>
           <td>{{ u.first_name }} {{ u.last_name }}</td>
           <td>{{ u.email }}</td>
@@ -52,10 +70,58 @@
               <button class="btn btn-outline btn-sm" onclick="copy('lnk-{{ loop.index }}')">Copy</button>
             </div>
           </td>
+          <td style="text-align:right;white-space:nowrap;">
+            <button class="btn btn-outline btn-sm" type="button" onclick='editUser({{ u | tojson }})'>Edit</button>
+            <form method="post" action="/users/delete" style="display:inline;"
+                  onsubmit="return confirm('Delete {{ u.username }}?');">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+  </div>
+
+  <!-- Edit user -->
+  <div class="card mt-4" id="editCard" style="display:none;">
+    <div class="card-title" id="editFormTitle">Edit User</div>
+    <form method="post" action="/users/edit">
+      <input type="hidden" name="orig_username" id="f_orig_username" value="">
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input type="text" name="username" id="f_username" class="form-control" autocomplete="off" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Group</label>
+          <input type="text" name="group" id="f_group" class="form-control" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label class="form-label">First Name</label>
+          <input type="text" name="first_name" id="f_first_name" class="form-control" autocomplete="off" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Last Name</label>
+          <input type="text" name="last_name" id="f_last_name" class="form-control" autocomplete="off" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" name="email" id="f_email" class="form-control" autocomplete="off" required>
+        </div>
+        <div class="form-group" style="align-self:end;">
+          <label class="form-check">
+            <input type="checkbox" class="form-check-input" name="track_open" id="f_track_open">
+            <span class="form-check-label">Open tracking enabled</span>
+          </label>
+        </div>
+      </div>
+      <div class="input-row mt-3">
+        <button type="submit" class="btn btn-primary">Save User</button>
+        <button type="button" class="btn btn-outline" onclick="cancelEdit()">Cancel</button>
+      </div>
+    </form>
   </div>
 
 </div>
@@ -70,6 +136,59 @@ $(document).ready(function() {
 function copy(id) {
   const el = document.getElementById(id);
   navigator.clipboard.writeText(el.value).catch(() => { el.select(); document.execCommand('copy'); });
+}
+function editUser(u) {
+  document.getElementById('editFormTitle').textContent = 'Edit User — ' + u.username;
+  document.getElementById('f_orig_username').value = u.username || '';
+  document.getElementById('f_username').value = u.username || '';
+  document.getElementById('f_first_name').value = u.first_name || '';
+  document.getElementById('f_last_name').value = u.last_name || '';
+  document.getElementById('f_email').value = u.email || '';
+  document.getElementById('f_group').value = u.group || '';
+  document.getElementById('f_track_open').checked = u.track_open === 'yes';
+  document.getElementById('editCard').style.display = '';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function cancelEdit() {
+  document.getElementById('editCard').style.display = 'none';
+}
+function toggleAll(cb) {
+  document.querySelectorAll('.user-chk').forEach(el => el.checked = cb.checked);
+}
+function submitUsernames(action, usernames) {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = action;
+  usernames.forEach(u => {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'usernames';
+    input.value = u;
+    form.appendChild(input);
+  });
+  document.body.appendChild(form);
+  form.submit();
+}
+function deleteSelected() {
+  const selected = Array.from(document.querySelectorAll('.user-chk:checked')).map(el => el.value);
+  if (!selected.length) { alert('No users selected.'); return; }
+  if (!confirm(`Delete ${selected.length} selected user(s)?`)) return;
+  submitUsernames('/users/bulk-delete', selected);
+}
+function deleteByGroup() {
+  const group = document.getElementById('groupSelect').value;
+  if (!group) { alert('Select a group first.'); return; }
+  if (!confirm(`Delete ALL users in group "${group}"?`)) return;
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/users/bulk-delete';
+  const input = document.createElement('input');
+  input.type = 'hidden';
+  input.name = 'group';
+  input.value = group;
+  form.appendChild(input);
+  document.body.appendChild(form);
+  form.submit();
 }
 </script>
 {% endblock %}
