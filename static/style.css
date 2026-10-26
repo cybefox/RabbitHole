@@ -300,6 +300,25 @@ textarea.form-control { resize: vertical; min-height: 120px; line-height: 1.6; }
 .rh-table tbody tr:last-child td { border-bottom: none; }
 .rh-table tbody tr:hover td { background: rgba(99,102,241,.05); }
 
+/* Scrollable body with a sticky header — used instead of DataTables' own
+   scrollY mode, which clones the header into a separate table and fights
+   with manual column resizing. */
+.table-scroll { max-height: 60vh; overflow-y: auto; overflow-x: auto; }
+.table-scroll .rh-table { table-layout: fixed; width: max-content; min-width: 100%; }
+.table-scroll thead th { position: sticky; top: 0; z-index: 2; }
+
+/* Column resize handle: a thin drag strip on the right edge of a <th>. */
+.rh-table th.resizable { position: relative; overflow: hidden; }
+.col-resizer {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+}
+.col-resizer:hover, .col-resizer.resizing { background: rgba(99,102,241,.4); }
+
 /* DataTables overrides */
 .dataTables_wrapper { color: var(--text); }
 

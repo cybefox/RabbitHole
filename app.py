@@ -804,6 +804,12 @@ def generate():
 @login_required
 def users():
     all_users = load_users()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT LOWER(email) AS email FROM email_log")
+            sent_emails = {r['email'] for r in cur.fetchall()}
+    for u in all_users:
+        u['emailed'] = u['email'].strip().lower() in sent_emails
     groups = sorted({u['group'] for u in all_users if u.get('group')})
     return render_template('users.html', users=all_users, groups=groups)
 
@@ -1723,8 +1729,10 @@ def email_template():
     groups         = sorted(set(u['group'] for u in all_users if u.get('group')))
     selected_group = request.form.get('group') if request.method == 'POST' else None
     selected_usernames = request.form.getlist('usernames')
+    select_all_group   = request.form.get('select_all_group') == '1'
     template_text  = request.form.get('template', '')
     generated      = []
+    preview_note   = ''
 
     users = [u for u in all_users if u['group'] == selected_group] if selected_group else []
 
@@ -1733,28 +1741,40 @@ def email_template():
     landing_id = request.form.get('landing_page_id', '').strip() or None
 
     if request.method == 'POST' and request.form.get('action') == 'generate':
-        for u in users:
-            if u['username'] in selected_usernames:
-                link_url, pixel_url = tracking_urls(u['token'], campaign, landing_id)
-                pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
-                track_open = u.get('track_open') == 'yes'
-                body = template_text \
-                    .replace("{{first_name}}", u['first_name']) \
-                    .replace("{{last_name}}",  u['last_name']) \
-                    .replace("{{email}}",      u['email']) \
-                    .replace("{{token}}",      u['token']) \
-                    .replace("{{link}}",       f'<a href="{link_url}">{link_text}</a>') \
-                    .replace("{{pixel}}",      pixel_tag if track_open else '')
-                if track_open and pixel_url not in body:
-                    body += pixel_tag
-                generated.append({'email': u['email'], 'body': body})
+        # "Select all" skips per-row checkboxes (see /send-emails), so preview
+        # the whole group too — capped, since rendering thousands of previews
+        # would be pointless to scroll through and slow to generate.
+        PREVIEW_CAP = 25
+        if select_all_group:
+            preview_targets = users[:PREVIEW_CAP]
+            if len(users) > PREVIEW_CAP:
+                preview_note = f"Showing {PREVIEW_CAP} of {len(users)} selected — Launch Campaign will send to all of them."
+        else:
+            wanted = set(selected_usernames)
+            preview_targets = [u for u in users if u['username'] in wanted]
+
+        for u in preview_targets:
+            link_url, pixel_url = tracking_urls(u['token'], campaign, landing_id)
+            pixel_tag = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
+            track_open = u.get('track_open') == 'yes'
+            body = template_text \
+                .replace("{{first_name}}", u['first_name']) \
+                .replace("{{last_name}}",  u['last_name']) \
+                .replace("{{email}}",      u['email']) \
+                .replace("{{token}}",      u['token']) \
+                .replace("{{link}}",       f'<a href="{link_url}">{link_text}</a>') \
+                .replace("{{pixel}}",      pixel_tag if track_open else '')
+            if track_open and pixel_url not in body:
+                body += pixel_tag
+            generated.append({'email': u['email'], 'body': body})
 
     saved_templates = load_templates()
     smtp_list       = load_smtp_configs()
     landing_list    = load_landing_pages()
     return render_template("email_template.html", groups=groups, users=users,
                            selected_group=selected_group, template_text=template_text,
-                           generated=generated, saved_templates=saved_templates,
+                           generated=generated, preview_note=preview_note,
+                           saved_templates=saved_templates,
                            smtp_configs=smtp_list, landing_pages=landing_list)
 
 
@@ -1850,6 +1870,9 @@ def send_emails():
     """Launch a campaign as a background job and return immediately, so multiple
     campaigns can run concurrently. Progress is tracked on the /campaigns page."""
     selected_usernames = request.form.getlist('usernames')
+    select_all_group   = request.form.get('select_all_group') == '1'
+    group              = request.form.get('group', '').strip()
+    status_filter      = request.form.get('status_filter', '').strip()
     template           = request.form.get('template')
     delay              = max(0, int(request.form.get('delay', 5) or 0))
     config_id          = request.form.get('smtp_config_id', '').strip() or None
@@ -1858,7 +1881,7 @@ def send_emails():
     label              = request.form.get('campaign', '').strip()
     landing_id         = request.form.get('landing_page_id', '').strip() or None
 
-    if not selected_usernames:
+    if not select_all_group and not selected_usernames:
         return render_template("email_sent_summary.html", sent=[], count=0,
                                message="❌ No users selected.")
 
@@ -1867,8 +1890,28 @@ def send_emails():
         return render_template("email_sent_summary.html", sent=[], count=0,
                                message="❌ No SMTP config available. Add one under SMTP.")
 
-    all_users     = load_users()
-    users_to_send = [u for u in all_users if u['username'] in selected_usernames]
+    all_users = load_users()
+
+    # "Select all" bypasses the per-row checkbox list entirely — the browser
+    # only ever submits checkboxes still attached to the DOM, which with a
+    # paginated recipient table caps out at one page's worth (e.g. 100) no
+    # matter how many rows are actually checked. Re-deriving the recipient
+    # set straight from the group/status filter scales to any list size.
+    if select_all_group:
+        users_to_send = [u for u in all_users if not group or u['group'] == group]
+        if status_filter in ('sent', 'pending'):
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT DISTINCT LOWER(email) AS email FROM email_log")
+                    sent_emails = {r['email'] for r in cur.fetchall()}
+            if status_filter == 'sent':
+                users_to_send = [u for u in users_to_send if u['email'].strip().lower() in sent_emails]
+            else:
+                users_to_send = [u for u in users_to_send if u['email'].strip().lower() not in sent_emails]
+    else:
+        wanted        = set(selected_usernames)
+        users_to_send = [u for u in all_users if u['username'] in wanted]
+
     if not users_to_send:
         return render_template("email_sent_summary.html", sent=[], count=0,
                                message="❌ No matching users.")

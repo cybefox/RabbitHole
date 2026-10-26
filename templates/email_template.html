@@ -40,18 +40,29 @@
         <div class="card-title mb-3">2 — Select Recipients</div>
         <form method="POST" id="sendForm" action="/send-emails">
           <input type="hidden" name="group" value="{{ selected_group }}">
+          <input type="hidden" name="select_all_group" id="selectAllGroupField" value="0">
 
           <div class="flex-between mb-3">
             <label class="form-check">
               <input type="checkbox" class="form-check-input" id="selectAll">
-              <span class="form-check-label text-sm">Select All</span>
+              <span class="form-check-label text-sm">Select All (this page)</span>
             </label>
-            <select id="statusFilter" class="form-select" style="width:auto;min-width:120px;">
+            <select name="status_filter" id="statusFilter" class="form-select" style="width:auto;min-width:120px;">
               <option value="">All</option>
               <option value="sent">Sent</option>
               <option value="pending">Pending</option>
             </select>
           </div>
+
+          <div class="input-row mb-3" style="background:var(--surface-2);border-radius:8px;padding:.6rem .8rem;">
+            <label class="form-check">
+              <input type="checkbox" class="form-check-input" id="selectAllGroupChk">
+              <span class="form-check-label text-sm">
+                Select <strong>all {{ users | length }}</strong> users in this group (every page, not just what's visible)
+              </span>
+            </label>
+          </div>
+          <p class="form-hint mb-3" id="selectionSummary">0 recipient(s) selected.</p>
 
           <div class="table-wrap" style="border-radius:10px;overflow:hidden;">
             <table class="rh-table" id="userTable">
@@ -173,6 +184,7 @@
       {% if generated %}
       <div class="card">
         <div class="card-title">Preview — {{ generated | length }} email(s)</div>
+        {% if preview_note %}<p class="form-hint mb-3">{{ preview_note }}</p>{% endif %}
         {% for g in generated %}
         <div style="margin-bottom:1.25rem;padding-bottom:1.25rem;border-bottom:1px solid var(--border);">
           <p class="text-sm text-muted mb-2">→ <strong style="color:var(--text);">{{ g.email }}</strong></p>
@@ -225,14 +237,45 @@ function deleteTemplate() {
 }
 
 $(document).ready(function() {
-  const table = $('#userTable').DataTable({ pageLength:50, ordering:true, scrollY:'320px', scrollCollapse:true, paging:true });
+  const table = $('#userTable').DataTable({
+    pageLength:50, ordering:true, scrollY:'320px', scrollCollapse:true, paging:true,
+    lengthMenu: [[25,50,100,250,500,-1],[25,50,100,250,500,"All"]],
+  });
+  const totalInGroup = {{ users | length }};
+
+  function updateSelectionSummary() {
+    const groupWide = $('#selectAllGroupChk').is(':checked');
+    const summary = document.getElementById('selectionSummary');
+    if (groupWide) {
+      summary.textContent = `All ${totalInGroup} recipient(s) in this group selected.`;
+      return;
+    }
+    const n = $('#userTable tbody input[type="checkbox"]:checked').length;
+    summary.textContent = `${n} recipient(s) selected on this page.`;
+  }
+
+  // Browsers only submit form fields still attached to the DOM, and a
+  // paginated table only keeps the current page's checkboxes attached —
+  // so "Select All" (per-page) can never cover a list of thousands.
+  // "Select ALL in group" sidesteps that by sending a flag the backend
+  // resolves against the full group server-side, instead of enumerating
+  // every username as a checkbox.
+  $('#selectAllGroupChk').on('change', function() {
+    const on = this.checked;
+    document.getElementById('selectAllGroupField').value = on ? '1' : '0';
+    $('#userTable tbody input[type="checkbox"], #selectAll').prop('disabled', on);
+    if (on) $('#userTable tbody input[type="checkbox"]').prop('checked', false);
+    updateSelectionSummary();
+  });
 
   $('#selectAll').on('change', function() {
     const checked = this.checked;
     $('#userTable tbody input[type="checkbox"]').each(function() {
       if ($(this).closest('tr').is(':visible')) this.checked = checked;
     });
+    updateSelectionSummary();
   });
+  $('#userTable').on('change', 'input[type="checkbox"]', updateSelectionSummary);
 
   $.fn.dataTable.ext.search.push(function(settings, data, dataIndex) {
     const sel = $('#statusFilter').val();
@@ -241,6 +284,8 @@ $(document).ready(function() {
     return !sel || st === sel;
   });
   $('#statusFilter').on('change', function() { table.draw(); });
+
+  updateSelectionSummary();
 });
 </script>
 {% endblock %}

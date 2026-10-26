@@ -20,7 +20,7 @@
     <a href="/import" class="btn btn-primary btn-sm">+ Import</a>
   </div>
 
-  <div class="input-row mb-2" style="justify-content:space-between;">
+  <div class="input-row mb-2" style="justify-content:space-between;flex-wrap:wrap;gap:.5rem;">
     <div class="input-row">
       <button class="btn btn-danger btn-sm" type="button" onclick="deleteSelected()">🗑 Delete Selected</button>
     </div>
@@ -35,23 +35,56 @@
     </div>
   </div>
 
-  <div class="table-wrap">
+  <div class="input-row mb-2" style="flex-wrap:wrap;gap:.5rem;">
+    <select class="form-select form-select-sm" id="groupFilter" style="width:auto;">
+      <option value="">All groups</option>
+      {% for g in groups %}
+      <option value="{{ g }}">{{ g }}</option>
+      {% endfor %}
+    </select>
+    <select class="form-select form-select-sm" id="pixelFilter" style="width:auto;">
+      <option value="">All pixel status</option>
+      <option value="yes">Pixel: Enabled</option>
+      <option value="no">Pixel: Off</option>
+    </select>
+    <select class="form-select form-select-sm" id="sentFilter" style="width:auto;">
+      <option value="">All send status</option>
+      <option value="yes">Email: Sent</option>
+      <option value="no">Email: Pending</option>
+    </select>
+    <button class="btn btn-outline btn-sm" type="button" onclick="clearFilters()">Clear filters</button>
+    <span class="text-muted" style="font-size:.8rem;">Drag a column's right edge to resize. Type in the table's search box to filter by username/name/email.</span>
+  </div>
+
+  <div class="table-wrap table-scroll">
     <table class="rh-table" id="usersTable">
+      <colgroup>
+        <col style="width:40px;">
+        <col style="width:140px;">
+        <col style="width:160px;">
+        <col style="width:200px;">
+        <col style="width:110px;">
+        <col style="width:90px;">
+        <col style="width:90px;">
+        <col style="width:220px;">
+        <col style="width:150px;">
+      </colgroup>
       <thead>
         <tr>
           <th><input type="checkbox" id="selectAll" onclick="toggleAll(this)"></th>
-          <th>Username</th>
-          <th>Full Name</th>
-          <th>Email</th>
-          <th>Group</th>
-          <th>Pixel</th>
-          <th>Link</th>
+          <th class="resizable">Username<span class="col-resizer"></span></th>
+          <th class="resizable">Full Name<span class="col-resizer"></span></th>
+          <th class="resizable">Email<span class="col-resizer"></span></th>
+          <th class="resizable">Group<span class="col-resizer"></span></th>
+          <th class="resizable">Pixel<span class="col-resizer"></span></th>
+          <th class="resizable">Sent<span class="col-resizer"></span></th>
+          <th class="resizable">Link<span class="col-resizer"></span></th>
           <th style="text-align:right;">Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for u in users %}
-        <tr>
+        <tr data-group="{{ u.group }}" data-pixel="{{ 'yes' if u.track_open == 'yes' else 'no' }}" data-sent="{{ 'yes' if u.emailed else 'no' }}">
           <td><input type="checkbox" class="user-chk" value="{{ u.username }}"></td>
           <td>{{ u.username }}</td>
           <td>{{ u.first_name }} {{ u.last_name }}</td>
@@ -62,6 +95,13 @@
               <span class="badge badge-success">Enabled</span>
             {% else %}
               <span class="badge badge-muted">Off</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.emailed %}
+              <span class="badge badge-success">Sent</span>
+            {% else %}
+              <span class="badge badge-muted">Pending</span>
             {% endif %}
           </td>
           <td>
@@ -130,8 +170,75 @@
 {% block scripts %}
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script>
+let usersTable = null;
+
+$.fn.dataTable.ext.search.push(function(settings, searchData, index, rowData, counter) {
+  if (settings.nTable.id !== 'usersTable') return true;
+  const row   = settings.aoData[index].nTr;
+  const group = document.getElementById('groupFilter').value;
+  const pixel = document.getElementById('pixelFilter').value;
+  const sent  = document.getElementById('sentFilter').value;
+  if (group && row.dataset.group !== group) return false;
+  if (pixel && row.dataset.pixel !== pixel) return false;
+  if (sent  && row.dataset.sent  !== sent)  return false;
+  return true;
+});
+
+function clearFilters() {
+  document.getElementById('groupFilter').value = '';
+  document.getElementById('pixelFilter').value = '';
+  document.getElementById('sentFilter').value = '';
+  usersTable.draw();
+}
+
+// Column resize: drag the handle on a <th> to resize its <col>. Widths are
+// stored per-viewer in localStorage so a reload keeps the layout — never
+// shared, so a missing/corrupt value just falls back to the CSS default.
+function initColumnResize() {
+  const table = document.getElementById('usersTable');
+  const cols  = table.querySelectorAll('colgroup col');
+  const STORAGE_KEY = 'rh_users_col_widths';
+
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch (e) { saved = {}; }
+  cols.forEach((col, i) => { if (saved[i]) col.style.width = saved[i] + 'px'; });
+
+  let active = null, startX = 0, startWidth = 0;
+
+  table.querySelectorAll('th.resizable').forEach((th, i) => {
+    const handle = th.querySelector('.col-resizer');
+    if (!handle) return;
+    handle.addEventListener('mousedown', e => {
+      active = { col: cols[th.cellIndex], index: th.cellIndex, handle };
+      startX = e.pageX;
+      startWidth = active.col.getBoundingClientRect().width;
+      handle.classList.add('resizing');
+      e.preventDefault();
+    });
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!active) return;
+    const width = Math.max(50, startWidth + (e.pageX - startX));
+    active.col.style.width = width + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!active) return;
+    active.handle.classList.remove('resizing');
+    saved[active.index] = Math.round(active.col.getBoundingClientRect().width);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(saved)); } catch (e) {}
+    if (usersTable) usersTable.columns.adjust();
+    active = null;
+  });
+}
+
 $(document).ready(function() {
-  $('#usersTable').DataTable({ pageLength:50, ordering:true, scrollY:'60vh', scrollCollapse:true });
+  usersTable = $('#usersTable').DataTable({ pageLength:50, ordering:true });
+  document.getElementById('groupFilter').onchange = () => usersTable.draw();
+  document.getElementById('pixelFilter').onchange = () => usersTable.draw();
+  document.getElementById('sentFilter').onchange  = () => usersTable.draw();
+  initColumnResize();
 });
 function copy(id) {
   const el = document.getElementById(id);
