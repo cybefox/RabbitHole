@@ -243,6 +243,22 @@ $(document).ready(function() {
   });
   const totalInGroup = {{ users | length }};
 
+  // DataTables detaches rows that don't match the current search/page from
+  // the live DOM (not just display:none) — so a plain DOM query, or a native
+  // form submit, only ever sees whichever page/search is active right now.
+  // Checking users under several different searches would silently drop all
+  // but the last search's picks. table.rows().nodes() walks every row in the
+  // dataset regardless of the active filter, so this is the only way to read
+  // (or submit) the real full selection.
+  function allCheckedUsernames() {
+    const checked = [];
+    table.rows().nodes().each(function(tr) {
+      const cb = tr.querySelector('input[type="checkbox"]');
+      if (cb && cb.checked) checked.push(cb.value);
+    });
+    return checked;
+  }
+
   function updateSelectionSummary() {
     const groupWide = $('#selectAllGroupChk').is(':checked');
     const summary = document.getElementById('selectionSummary');
@@ -250,8 +266,8 @@ $(document).ready(function() {
       summary.textContent = `All ${totalInGroup} recipient(s) in this group selected.`;
       return;
     }
-    const n = $('#userTable tbody input[type="checkbox"]:checked').length;
-    summary.textContent = `${n} recipient(s) selected on this page.`;
+    const n = allCheckedUsernames().length;
+    summary.textContent = `${n} recipient(s) selected.`;
   }
 
   // Browsers only submit form fields still attached to the DOM, and a
@@ -276,6 +292,18 @@ $(document).ready(function() {
     updateSelectionSummary();
   });
   $('#userTable').on('change', 'input[type="checkbox"]', updateSelectionSummary);
+
+  // At submit time, replace whatever checkboxes happen to still be attached
+  // (the current page/search only) with hidden fields for the real, full
+  // selection — see allCheckedUsernames() above for why that's necessary.
+  $('#sendForm').on('submit', function() {
+    if ($('#selectAllGroupChk').is(':checked')) return; // server resolves the whole group instead
+    const usernames = allCheckedUsernames();
+    $('#userTable input[type="checkbox"]').prop('disabled', true);
+    usernames.forEach(u => {
+      $('<input>').attr({ type: 'hidden', name: 'usernames', value: u }).appendTo(this);
+    });
+  });
 
   $.fn.dataTable.ext.search.push(function(settings, data, dataIndex) {
     const sel = $('#statusFilter').val();
