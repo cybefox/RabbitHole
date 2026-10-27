@@ -220,6 +220,14 @@ def init_db():
                 UPDATE campaigns SET status = 'interrupted', finished_at = %s
                  WHERE status IN ('running', 'stopping')
             """, (_utcnow(),))
+            # The dashboard joins users to clicks/opens/submissions by token on
+            # every load (and now on every poll) — these tables grow unbounded,
+            # so without an index that join degrades to a full scan per request.
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_clicks_token ON clicks(token)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_opens_token ON opens(token)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_submissions_token ON submissions(token)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_grp ON users(grp)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_email_log_email_lower ON email_log(LOWER(email))")
     _seed_smtp_config()
     _seed_admin_account()
     _migrate_csv_to_db()
@@ -977,22 +985,15 @@ def submit():
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    show_scanner = _show_scanner_hits()
+def _compute_dashboard_stats(show_scanner):
+    """Shared by the initial page render and the polled /api/stats endpoint —
+    kept to COUNT(*) queries only; the full user/click rows for the activity
+    table are fetched separately (and lazily) via /api/user-activity."""
     scanner_filter = "" if show_scanner else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT username, first_name, last_name, email,
-                       grp AS "group", token, link, track_open
-                FROM users
-            """)
-            all_users = [dict(r) for r in cur.fetchall()]
-
-            cur.execute(f"SELECT token, timestamp, ip FROM clicks {scanner_filter} ORDER BY timestamp")
-            click_rows = cur.fetchall()
+            cur.execute("SELECT COUNT(*) AS cnt FROM users")
+            total_users = cur.fetchone()['cnt']
 
             cur.execute(f"SELECT COUNT(DISTINCT token) AS cnt FROM opens {scanner_filter}")
             opens_count = cur.fetchone()['cnt']
@@ -1017,28 +1018,71 @@ def dashboard():
             cur.execute("SELECT COUNT(*) AS cnt FROM clicks WHERE is_scanner")
             bot_clicks_count = cur.fetchone()['cnt']
 
-    user_map = {u['token']: u for u in all_users}
-    enriched_clicks = []
-    for r in click_rows:
-        u = user_map.get(r['token'], {})
-        enriched_clicks.append([
-            u.get('first_name', ''), u.get('last_name', ''),
-            u.get('email', ''), r['token'], r['timestamp'], r['ip']
-        ])
-
     stats = {
-        'total_users':   len(all_users),
+        'total_users':   total_users,
         'emails_sent':   sent_count,
         'emails_opened': opens_count,
         'links_clicked': clicks_count,
         'submissions':   submissions_count,
         'bot_clicks':    bot_clicks_count,
+        'email_pending': max(0, total_users - sent_count),
     }
-    email_pending = max(0, len(all_users) - sent_count)
+    return stats, scanner_filtered
 
-    return render_template('dashboard.html', clicks=enriched_clicks, stats=stats,
-                           email_sent=sent_count, email_pending=email_pending,
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    show_scanner = _show_scanner_hits()
+    stats, scanner_filtered = _compute_dashboard_stats(show_scanner)
+    return render_template('dashboard.html', stats=stats,
+                           email_pending=stats['email_pending'],
                            show_scanner=show_scanner, scanner_filtered=scanner_filtered)
+
+
+@app.route('/api/stats')
+@login_required
+def api_stats():
+    stats, scanner_filtered = _compute_dashboard_stats(_show_scanner_hits())
+    return jsonify({'stats': stats, 'scanner_filtered': scanner_filtered})
+
+
+@app.route('/api/user-activity')
+@login_required
+def api_user_activity():
+    """Every user cross-referenced with their latest click, plus per-group
+    totals — done as a single indexed SQL join instead of the client
+    downloading the full users.csv and correlating thousands of rows in JS."""
+    scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT u.first_name, u.last_name, u.email, u.grp AS "group", u.token,
+                       c.timestamp, c.ip, c.is_scanner, c.scanner_vendor
+                FROM users u
+                LEFT JOIN (
+                    SELECT DISTINCT ON (token) token, timestamp, ip, is_scanner, scanner_vendor
+                    FROM clicks
+                    {scanner_filter}
+                    ORDER BY token, timestamp DESC
+                ) c ON c.token = u.token
+                ORDER BY u.first_name, u.last_name
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute(f"""
+                SELECT u.grp AS "group",
+                       COUNT(*) AS total,
+                       COUNT(c.token) AS clicked
+                FROM users u
+                LEFT JOIN (SELECT DISTINCT token FROM clicks {scanner_filter}) c
+                       ON c.token = u.token
+                GROUP BY u.grp
+            """)
+            group_stats = [dict(r) for r in cur.fetchall()]
+
+    groups = sorted({r['group'] for r in group_stats})
+    return jsonify({'rows': rows, 'groups': groups, 'group_stats': group_stats})
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────

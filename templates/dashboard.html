@@ -44,14 +44,15 @@
   {% endif %}
 
   <div class="stat-grid">
-    <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-value">{{ stats.total_users }}</div><div class="stat-label">Total Users</div></div>
-    <div class="stat-card"><div class="stat-icon">📤</div><div class="stat-value">{{ stats.emails_sent }}</div><div class="stat-label">Emails Sent</div></div>
-    <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value">{{ stats.emails_opened }}</div><div class="stat-label">Opened</div></div>
-    <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value">{{ stats.links_clicked }}</div><div class="stat-label">Clicked</div></div>
-    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value">{{ stats.submissions }}</div><div class="stat-label">Submitted</div></div>
-    <div class="stat-card"><div class="stat-icon">⏳</div><div class="stat-value">{{ email_pending }}</div><div class="stat-label">Pending</div></div>
-    <div class="stat-card"><div class="stat-icon">🤖</div><div class="stat-value">{{ stats.bot_clicks }}</div><div class="stat-label">Bot Clicks</div></div>
+    <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-value" id="stat-total_users">{{ stats.total_users }}</div><div class="stat-label">Total Users</div></div>
+    <div class="stat-card"><div class="stat-icon">📤</div><div class="stat-value" id="stat-emails_sent">{{ stats.emails_sent }}</div><div class="stat-label">Emails Sent</div></div>
+    <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value" id="stat-emails_opened">{{ stats.emails_opened }}</div><div class="stat-label">Opened</div></div>
+    <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value" id="stat-links_clicked">{{ stats.links_clicked }}</div><div class="stat-label">Clicked</div></div>
+    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value" id="stat-submissions">{{ stats.submissions }}</div><div class="stat-label">Submitted</div></div>
+    <div class="stat-card"><div class="stat-icon">⏳</div><div class="stat-value" id="stat-email_pending">{{ email_pending }}</div><div class="stat-label">Pending</div></div>
+    <div class="stat-card"><div class="stat-icon">🤖</div><div class="stat-value" id="stat-bot_clicks">{{ stats.bot_clicks }}</div><div class="stat-label">Bot Clicks</div></div>
   </div>
+  <p class="text-xs text-muted" id="liveIndicator" style="margin-top:-.75rem;margin-bottom:1rem;">● live</p>
 
   <div class="chart-grid mb-6">
     <div class="chart-card">
@@ -120,20 +121,12 @@
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script>
 let filterGroup = '', filterClick = '', pieChart = null, barChart = null, telemetryChart = null;
+let activityCache = null; // { rows, groups, group_stats } from /api/user-activity, filtered client-side
 const telemetryStats = { opened: {{ stats.emails_opened }}, clicked: {{ stats.links_clicked }}, submitted: {{ stats.submissions }} };
 
 // Escape all dynamic values before putting them in innerHTML — some fields
 // (IP from X-Forwarded-For, campaign label) are attacker-controllable.
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-function parseCSV(text) {
-  const [head, ...rows] = text.trim().split('\n');
-  const keys = head.split(',');
-  return rows.map(row => {
-    const values = row.split(',');
-    return Object.fromEntries(keys.map((k, i) => [k.trim(), (values[i]||'').trim()]));
-  });
-}
 
 function populateGroupFilter(groups) {
   const dd = document.getElementById('groupFilter');
@@ -141,7 +134,7 @@ function populateGroupFilter(groups) {
   [...groups].forEach(g => dd.innerHTML += `<option value="${esc(g)}">${esc(g)}</option>`);
 }
 
-function updateCharts(clicks, noClicks, groupMap) {
+function updateCharts(clicks, noClicks, groupStats) {
   if (pieChart) pieChart.destroy();
   if (barChart) barChart.destroy();
   const tickColor = '#64748b', gridColor = 'rgba(99,102,241,.08)';
@@ -152,10 +145,9 @@ function updateCharts(clicks, noClicks, groupMap) {
     options: { cutout: '68%', plugins: { legend: { labels: { color: tickColor, font: { size: 11 } } } } }
   });
 
-  const groups = Object.keys(groupMap);
   barChart = new Chart(document.getElementById('clickBarChart'), {
     type: 'bar',
-    data: { labels: groups, datasets: [{ label: 'Clicks', data: groups.map(g => groupMap[g].clicked), backgroundColor: '#6366f1', borderRadius: 5 }] },
+    data: { labels: groupStats.map(g => g.group), datasets: [{ label: 'Clicks', data: groupStats.map(g => g.clicked), backgroundColor: '#6366f1', borderRadius: 5 }] },
     options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: tickColor }, grid: { color: gridColor } }, y: { ticks: { color: tickColor }, grid: { color: gridColor } } } }
   });
 
@@ -189,38 +181,40 @@ function toggleScanner(checked) {
   location.href = url.toString();
 }
 
-async function fetchDashboard() {
+// The full per-user activity join (~thousands of rows) is fetched once and
+// cached; switching the group/click filters re-renders from that cache
+// instead of re-fetching and re-correlating everything from scratch.
+async function loadActivity() {
   document.getElementById('loader').style.display = 'block';
-  const [{ clicks: allClicks }, usersText] = await Promise.all([
-    fetch('/api/clicks' + scannerParam()).then(r => r.json()),
-    fetch('/users.csv').then(r => r.text())
-  ]);
-  const allUsers = parseCSV(usersText);
-  const clickedTokens = new Set(allClicks.map(c => c.token));
-  let groups = new Set(), groupMap = {}, clickCount = 0, noClick = 0, tbody = '';
+  activityCache = await fetch('/api/user-activity' + scannerParam()).then(r => r.json());
+  populateGroupFilter(activityCache.groups);
+  renderActivity();
+  document.getElementById('loader').style.display = 'none';
+}
 
-  allUsers.forEach(u => {
-    groups.add(u.group);
-    const hit = clickedTokens.has(u.token);
-    const cd  = hit ? allClicks.find(c => c.token === u.token) : null;
-    if (!groupMap[u.group]) groupMap[u.group] = { clicked:0, total:0 };
-    groupMap[u.group].total++;
-    if (hit) { groupMap[u.group].clicked++; clickCount++; } else noClick++;
+function renderActivity() {
+  if (!activityCache) return;
+  const { rows, group_stats } = activityCache;
+  let clickCount = 0, noClick = 0, tbody = '';
 
+  rows.forEach(u => {
+    const hit = !!u.timestamp;
+    if (hit) clickCount++; else noClick++;
     if ((filterGroup && u.group !== filterGroup) || (filterClick === 'clicked' && !hit) || (filterClick === 'not_clicked' && hit)) return;
-    const scannerCell = cd && cd.is_scanner
-      ? `<span class="badge badge-warning">${esc(cd.scanner_vendor || 'bot')}</span>`
-      : (cd ? '<span class="badge badge-success">human</span>' : '<span class="text-muted">—</span>');
-    tbody += `<tr><td>${esc(u.first_name)}</td><td>${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)}</td><td><code>${esc(u.token.substring(0,8))}…</code></td><td>${cd? esc(cd.timestamp) : '<span class="text-muted">—</span>'}</td><td>${cd? esc(cd.ip) : '<span class="text-muted">—</span>'}</td><td>${scannerCell}</td></tr>`;
+    const scannerCell = hit && u.is_scanner
+      ? `<span class="badge badge-warning">${esc(u.scanner_vendor || 'bot')}</span>`
+      : (hit ? '<span class="badge badge-success">human</span>' : '<span class="text-muted">—</span>');
+    tbody += `<tr><td>${esc(u.first_name)}</td><td>${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)}</td><td><code>${esc(u.token.substring(0,8))}…</code></td><td>${hit ? esc(u.timestamp) : '<span class="text-muted">—</span>'}</td><td>${hit ? esc(u.ip) : '<span class="text-muted">—</span>'}</td><td>${scannerCell}</td></tr>`;
   });
 
-  document.querySelector('#clickTable tbody').innerHTML = tbody;
-  updateCharts(clickCount, noClick, groupMap);
-  populateGroupFilter(groups);
-
+  // DataTable().destroy() restores ITS OWN cached original rows into the
+  // table — so it must run before the tbody is replaced, not after, or a
+  // shrinking filter (fewer rows than last render) silently reverts to the
+  // previous, larger row count.
   if ($.fn.DataTable.isDataTable('#clickTable')) $('#clickTable').DataTable().destroy();
+  document.querySelector('#clickTable tbody').innerHTML = tbody;
+  updateCharts(clickCount, noClick, group_stats);
   $('#clickTable').DataTable({ pageLength:25, ordering:true, scrollY:360, scrollCollapse:true, deferRender:true });
-  document.getElementById('loader').style.display = 'none';
 }
 
 async function fetchRepeats() {
@@ -230,8 +224,8 @@ async function fetchRepeats() {
     const ips = Array.isArray(u.ip_list) ? u.ip_list.join(', ') : (u.ip_list||'');
     tbody += `<tr><td>${esc(u.first_name)} ${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)||'—'}</td><td><strong>${esc(u.clicks)}</strong></td><td>${esc(u.first_click)}</td><td>${esc(u.last_click)}</td><td>${esc(ips)}</td></tr>`;
   });
-  document.querySelector('#repeatTable tbody').innerHTML = tbody;
   if ($.fn.DataTable.isDataTable('#repeatTable')) $('#repeatTable').DataTable().destroy();
+  document.querySelector('#repeatTable tbody').innerHTML = tbody;
   $('#repeatTable').DataTable({ pageLength:25, ordering:true, language:{ emptyTable:'No repeated clicks yet' } });
 }
 
@@ -261,10 +255,9 @@ async function fetchBotClicks() {
       <td class="text-xs text-muted">${esc(c.scanner_reason)}</td>
     </tr>`).join('');
 
+  if ($.fn.DataTable.isDataTable('#botClickTable')) $('#botClickTable').DataTable().destroy();
   document.querySelector('#botClickTable tbody').innerHTML =
     tbody || '<tr><td colspan="6" class="text-muted">No bot/scanner clicks recorded yet.</td></tr>';
-
-  if ($.fn.DataTable.isDataTable('#botClickTable')) $('#botClickTable').DataTable().destroy();
   if (botClicks.length) $('#botClickTable').DataTable({ pageLength: 25, ordering: true, order: [[3, 'desc']] });
 }
 
@@ -273,8 +266,42 @@ function resetAnalytics() {
   fetch('/reset-analytics', { method:'POST' }).then(r => r.json()).then(() => location.reload());
 }
 
-document.getElementById('groupFilter').onchange = e => { filterGroup = e.target.value; fetchDashboard(); };
-document.getElementById('clickFilter').onchange = e => { filterClick = e.target.value; fetchDashboard(); };
-document.addEventListener('DOMContentLoaded', () => { fetchDashboard(); fetchRepeats(); fetchCampaigns(); fetchBotClicks(); });
+// Live stat-card refresh — cheap (a handful of COUNT queries), so this runs
+// often. If any of the counts actually moved, also pull the heavier
+// per-user activity join so the table/charts below don't go stale.
+async function refreshStats() {
+  const { stats } = await fetch('/api/stats' + scannerParam()).then(r => r.json());
+  const changed = !lastStats || stats.links_clicked !== lastStats.links_clicked
+    || stats.submissions !== lastStats.submissions || stats.emails_opened !== lastStats.emails_opened
+    || stats.total_users !== lastStats.total_users || stats.emails_sent !== lastStats.emails_sent;
+  Object.entries(stats).forEach(([k, v]) => {
+    const el = document.getElementById('stat-' + k);
+    if (el) el.textContent = v;
+  });
+  telemetryStats.opened = stats.emails_opened;
+  telemetryStats.clicked = stats.links_clicked;
+  telemetryStats.submitted = stats.submissions;
+  lastStats = stats;
+  if (changed) {
+    loadActivity();
+    fetchRepeats();
+    fetchCampaigns();
+    fetchBotClicks();
+  }
+}
+
+// Seeded from the server-rendered stats so the first poll only acts on a
+// REAL change, instead of comparing against null and re-fetching everything
+// a second time right after the page's own initial load already did.
+let lastStats = {{ stats | tojson }};
+document.getElementById('groupFilter').onchange = e => { filterGroup = e.target.value; renderActivity(); };
+document.getElementById('clickFilter').onchange = e => { filterClick = e.target.value; renderActivity(); };
+document.addEventListener('DOMContentLoaded', () => {
+  loadActivity(); fetchRepeats(); fetchCampaigns(); fetchBotClicks();
+
+  // Poll only while the tab is actually visible — no point hammering the
+  // DB from a dozen forgotten background tabs.
+  setInterval(() => { if (document.visibilityState === 'visible') refreshStats(); }, 15000);
+});
 </script>
 {% endblock %}
