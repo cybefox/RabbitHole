@@ -24,11 +24,6 @@
       <select class="form-select" id="groupFilter" style="min-width:150px;">
         <option value="">All Groups</option>
       </select>
-      <select class="form-select" id="clickFilter" style="min-width:140px;">
-        <option value="">All Status</option>
-        <option value="clicked">Clicked</option>
-        <option value="not_clicked">Not Clicked</option>
-      </select>
       <label class="text-xs text-muted" style="display:flex;align-items:center;gap:.35rem;white-space:nowrap;">
         <input type="checkbox" id="scannerToggle" {% if show_scanner %}checked{% endif %} onchange="toggleScanner(this.checked)">
         Show scanner/bot hits
@@ -120,8 +115,8 @@
 {% block scripts %}
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script>
-let filterGroup = '', filterClick = '', pieChart = null, barChart = null, telemetryChart = null;
-let activityCache = null; // { rows, groups, group_stats } from /api/user-activity, filtered client-side
+let filterGroup = '', pieChart = null, barChart = null, telemetryChart = null;
+let activityCache = null; // { clicks, groups, group_stats } from /api/clicks + /api/group-stats, filtered client-side
 const telemetryStats = { opened: {{ stats.emails_opened }}, clicked: {{ stats.links_clicked }}, submitted: {{ stats.submissions }} };
 
 // Escape all dynamic values before putting them in innerHTML — some fields
@@ -181,12 +176,18 @@ function toggleScanner(checked) {
   location.href = url.toString();
 }
 
-// The full per-user activity join (~thousands of rows) is fetched once and
-// cached; switching the group/click filters re-renders from that cache
-// instead of re-fetching and re-correlating everything from scratch.
+// "Click Events" shows actual clicks only (one row per user who clicked) —
+// from /api/clicks, which is already scoped to real click events and is
+// therefore small regardless of total user count. Per-group totals (for the
+// dropdown and the bar chart) come separately from /api/group-stats, since
+// those need every user, not just the ones who clicked.
 async function loadActivity() {
   document.getElementById('loader').style.display = 'block';
-  activityCache = await fetch('/api/user-activity' + scannerParam()).then(r => r.json());
+  const [clicksResp, groupResp] = await Promise.all([
+    fetch('/api/clicks' + scannerParam()).then(r => r.json()),
+    fetch('/api/group-stats' + scannerParam()).then(r => r.json()),
+  ]);
+  activityCache = { clicks: clicksResp.clicks, groups: groupResp.groups, group_stats: groupResp.group_stats };
   populateGroupFilter(activityCache.groups);
   renderActivity();
   document.getElementById('loader').style.display = 'none';
@@ -194,18 +195,19 @@ async function loadActivity() {
 
 function renderActivity() {
   if (!activityCache) return;
-  const { rows, group_stats } = activityCache;
-  let clickCount = 0, noClick = 0, tbody = '';
+  const { clicks, group_stats } = activityCache;
+  let tbody = '';
 
-  rows.forEach(u => {
-    const hit = !!u.timestamp;
-    if (hit) clickCount++; else noClick++;
-    if ((filterGroup && u.group !== filterGroup) || (filterClick === 'clicked' && !hit) || (filterClick === 'not_clicked' && hit)) return;
-    const scannerCell = hit && u.is_scanner
+  clicks.forEach(u => {
+    if (filterGroup && u.group !== filterGroup) return;
+    const scannerCell = u.is_scanner
       ? `<span class="badge badge-warning">${esc(u.scanner_vendor || 'bot')}</span>`
-      : (hit ? '<span class="badge badge-success">human</span>' : '<span class="text-muted">—</span>');
-    tbody += `<tr><td>${esc(u.first_name)}</td><td>${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)}</td><td><code>${esc(u.token.substring(0,8))}…</code></td><td>${hit ? esc(u.timestamp) : '<span class="text-muted">—</span>'}</td><td>${hit ? esc(u.ip) : '<span class="text-muted">—</span>'}</td><td>${scannerCell}</td></tr>`;
+      : '<span class="badge badge-success">human</span>';
+    tbody += `<tr><td>${esc(u.first_name)}</td><td>${esc(u.last_name)}</td><td>${esc(u.email)}</td><td>${esc(u.group)}</td><td><code>${esc(u.token.substring(0,8))}…</code></td><td>${esc(u.timestamp)}</td><td>${esc(u.ip)}</td><td>${scannerCell}</td></tr>`;
   });
+
+  const totalClicked = group_stats.reduce((s, g) => s + g.clicked, 0);
+  const totalUsers = group_stats.reduce((s, g) => s + g.total, 0);
 
   // DataTable().destroy() restores ITS OWN cached original rows into the
   // table — so it must run before the tbody is replaced, not after, or a
@@ -213,8 +215,8 @@ function renderActivity() {
   // previous, larger row count.
   if ($.fn.DataTable.isDataTable('#clickTable')) $('#clickTable').DataTable().destroy();
   document.querySelector('#clickTable tbody').innerHTML = tbody;
-  updateCharts(clickCount, noClick, group_stats);
-  $('#clickTable').DataTable({ pageLength:25, ordering:true, scrollY:360, scrollCollapse:true, deferRender:true });
+  updateCharts(totalClicked, totalUsers - totalClicked, group_stats);
+  $('#clickTable').DataTable({ pageLength:25, ordering:true, scrollY:360, scrollCollapse:true, deferRender:true, order: [[5, 'desc']] });
 }
 
 async function fetchRepeats() {
@@ -295,7 +297,6 @@ async function refreshStats() {
 // a second time right after the page's own initial load already did.
 let lastStats = {{ stats | tojson }};
 document.getElementById('groupFilter').onchange = e => { filterGroup = e.target.value; renderActivity(); };
-document.getElementById('clickFilter').onchange = e => { filterClick = e.target.value; renderActivity(); };
 document.addEventListener('DOMContentLoaded', () => {
   loadActivity(); fetchRepeats(); fetchCampaigns(); fetchBotClicks();
 

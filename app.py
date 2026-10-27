@@ -988,7 +988,7 @@ def submit():
 def _compute_dashboard_stats(show_scanner):
     """Shared by the initial page render and the polled /api/stats endpoint —
     kept to COUNT(*) queries only; the full user/click rows for the activity
-    table are fetched separately (and lazily) via /api/user-activity."""
+    table are fetched separately (and lazily) via /api/clicks + /api/group-stats."""
     scanner_filter = "" if show_scanner else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1047,29 +1047,15 @@ def api_stats():
     return jsonify({'stats': stats, 'scanner_filtered': scanner_filtered})
 
 
-@app.route('/api/user-activity')
+@app.route('/api/group-stats')
 @login_required
-def api_user_activity():
-    """Every user cross-referenced with their latest click, plus per-group
-    totals — done as a single indexed SQL join instead of the client
-    downloading the full users.csv and correlating thousands of rows in JS."""
+def api_group_stats():
+    """Per-group totals (for the group dropdown and the clicks-by-group
+    chart) — the actual click EVENTS for the dashboard's table come from
+    /api/clicks, which already returns one row per user who really clicked."""
     scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute(f"""
-                SELECT u.first_name, u.last_name, u.email, u.grp AS "group", u.token,
-                       c.timestamp, c.ip, c.is_scanner, c.scanner_vendor
-                FROM users u
-                LEFT JOIN (
-                    SELECT DISTINCT ON (token) token, timestamp, ip, is_scanner, scanner_vendor
-                    FROM clicks
-                    {scanner_filter}
-                    ORDER BY token, timestamp DESC
-                ) c ON c.token = u.token
-                ORDER BY u.first_name, u.last_name
-            """)
-            rows = [dict(r) for r in cur.fetchall()]
-
             cur.execute(f"""
                 SELECT u.grp AS "group",
                        COUNT(*) AS total,
@@ -1082,7 +1068,7 @@ def api_user_activity():
             group_stats = [dict(r) for r in cur.fetchall()]
 
     groups = sorted({r['group'] for r in group_stats})
-    return jsonify({'rows': rows, 'groups': groups, 'group_stats': group_stats})
+    return jsonify({'groups': groups, 'group_stats': group_stats})
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
