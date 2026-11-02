@@ -6,7 +6,8 @@
 {% endblock %}
 
 {% block nav_actions %}
-<a href="/users.csv" class="btn btn-outline btn-sm">⬇ Export CSV</a>
+<a href="/users.csv" class="btn btn-outline btn-sm">⬇ Export All (CSV)</a>
+<button type="button" class="btn btn-outline btn-sm" onclick="exportFilteredUsers()">⬇ Export Filtered (CSV)</button>
 {% endblock %}
 
 {% block body %}
@@ -84,7 +85,8 @@
       </thead>
       <tbody>
         {% for u in users %}
-        <tr data-group="{{ u.group }}" data-pixel="{{ 'yes' if u.track_open == 'yes' else 'no' }}" data-sent="{{ 'yes' if u.emailed else 'no' }}">
+        <tr data-group="{{ u.group }}" data-pixel="{{ 'yes' if u.track_open == 'yes' else 'no' }}" data-sent="{{ 'yes' if u.emailed else 'no' }}"
+            data-username="{{ u.username }}" data-first="{{ u.first_name }}" data-last="{{ u.last_name }}" data-email="{{ u.email }}" data-link="{{ u.link }}">
           <td><input type="checkbox" class="user-chk" value="{{ u.username }}"></td>
           <td>{{ u.username }}</td>
           <td>{{ u.first_name }} {{ u.last_name }}</td>
@@ -282,6 +284,37 @@ function deleteSelected() {
   if (!confirm(`Delete ${selected.length} selected user(s)?`)) return;
   submitUsernames('/users/bulk-delete', selected);
 }
+function csvEscape(v) {
+  v = String(v ?? '');
+  if (/[",\n\r]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"';
+  return v;
+}
+
+function exportFilteredUsers() {
+  const rows = usersTable.rows({ search: 'applied' }).nodes();
+  if (!rows.length) { alert('No rows match the current filters.'); return; }
+  const header = ['username', 'first_name', 'last_name', 'email', 'group', 'track_open', 'emailed', 'link'];
+  const lines = [header.join(',')];
+  Array.from(rows).forEach(tr => {
+    const d = tr.dataset;
+    lines.push([
+      d.username, d.first, d.last, d.email, d.group,
+      d.pixel === 'yes' ? 'yes' : 'no',
+      d.sent === 'yes' ? 'yes' : 'no',
+      d.link,
+    ].map(csvEscape).join(','));
+  });
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'users_filtered.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function deleteByGroup() {
   const group = document.getElementById('groupSelect').value;
   if (!group) { alert('Select a group first.'); return; }
