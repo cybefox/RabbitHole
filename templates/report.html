@@ -6,7 +6,7 @@
 {% endblock %}
 
 {% block nav_actions %}
-<a href="/export/csv" class="btn btn-outline btn-sm">⬇ Export CSV</a>
+<a href="/export/report.csv" class="btn btn-outline btn-sm">⬇ Export CSV</a>
 {% endblock %}
 
 {% block body %}
@@ -15,11 +15,47 @@
   <div class="page-header flex-between">
     <div>
       <h1>Report</h1>
-      <p>Full simulation status per user</p>
+      <p>Full simulation status per user — safe to share with a client</p>
     </div>
     <span class="text-sm text-muted">{{ users | length }} users</span>
   </div>
 
+  <div class="stat-grid mb-6">
+    <div class="stat-card"><div class="stat-icon">👥</div><div class="stat-value">{{ summary.total }}</div><div class="stat-label">Targeted</div></div>
+    <div class="stat-card"><div class="stat-icon">📤</div><div class="stat-value">{{ summary.sent }}</div><div class="stat-label">Sent ({{ summary.pct_sent }}%)</div></div>
+    <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value">{{ summary.opened }}</div><div class="stat-label">Opened ({{ summary.pct_opened }}%)</div></div>
+    <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value">{{ summary.clicked }}</div><div class="stat-label">Clicked ({{ summary.pct_clicked }}%)</div></div>
+    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value">{{ summary.submitted }}</div><div class="stat-label">Submitted ({{ summary.pct_submitted }}%)</div></div>
+  </div>
+
+  {% if group_breakdown | length > 1 %}
+  <div class="page-header">
+    <h1 style="font-size:1.1rem;">By Group</h1>
+  </div>
+  <div class="table-wrap mb-6">
+    <table class="rh-table">
+      <thead>
+        <tr><th>Group</th><th>Targeted</th><th>Sent</th><th>Opened</th><th>Clicked</th><th>Submitted</th></tr>
+      </thead>
+      <tbody>
+        {% for g in group_breakdown %}
+        <tr>
+          <td>{{ g.group }}</td>
+          <td>{{ g.total }}</td>
+          <td>{{ g.sent }}</td>
+          <td>{{ g.opened }}</td>
+          <td>{{ g.clicked }}</td>
+          <td>{{ g.submitted }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="page-header">
+    <h1 style="font-size:1.1rem;">Per User</h1>
+  </div>
   <div class="table-wrap">
     <table class="rh-table" id="reportTable">
       <thead>
@@ -28,9 +64,14 @@
           <th>First</th>
           <th>Last</th>
           <th>Email</th>
+          <th>Group</th>
           <th>Email Sent</th>
+          <th>Opened</th>
           <th>Clicked</th>
           <th>Total Clicks</th>
+          <th>Submitted</th>
+          <th>Campaigns</th>
+          <th>Last Activity</th>
           <th>IP Addresses</th>
         </tr>
       </thead>
@@ -41,21 +82,38 @@
           <td>{{ u.first_name }}</td>
           <td>{{ u.last_name }}</td>
           <td>{{ u.email }}</td>
+          <td>{{ u.group or '—' }}</td>
           <td>
-            {% if u.email_sent == '✅' %}
+            {% if u.email_sent %}
               <span class="badge badge-success">Sent</span>
             {% else %}
               <span class="badge badge-muted">Pending</span>
             {% endif %}
           </td>
           <td>
-            {% if u.link_clicked == '✅' %}
+            {% if u.opened %}
+              <span class="badge badge-success">Yes</span> <span class="text-xs text-muted">({{ u.total_opens }})</span>
+            {% else %}
+              <span class="badge badge-muted">No</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.link_clicked %}
               <span class="badge badge-success">Yes</span>
             {% else %}
               <span class="badge badge-muted">No</span>
             {% endif %}
           </td>
           <td>{{ u.total_clicks }}</td>
+          <td>
+            {% if u.submitted %}
+              <span class="badge badge-danger">Yes ({{ u.total_submissions }})</span>
+            {% else %}
+              <span class="badge badge-muted">No</span>
+            {% endif %}
+          </td>
+          <td class="text-sm text-muted">{{ u.campaigns or '—' }}</td>
+          <td class="text-xs text-muted">{{ u.last_activity or '—' }}</td>
           <td class="text-sm text-muted">{{ u.ips if u.ips else '—' }}</td>
         </tr>
         {% endfor %}

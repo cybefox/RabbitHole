@@ -44,6 +44,28 @@
   </p>
 
 </div>
+
+<!-- Resume setup modal — only shown for campaigns whose original recipient list can't be recovered -->
+<div class="modal-overlay" id="resumeModal" style="display:none;" onclick="if(event.target===this) closeResumeModal()">
+  <div class="modal-box">
+    <h3 style="margin-bottom:.5rem;">Resume Campaign</h3>
+    <p class="text-sm text-muted mb-3">
+      This campaign's original targeting criteria isn't on record. Pick a group to resume
+      into — anyone already emailed under this campaign is skipped automatically — or
+      resume into all users.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Group</label>
+      <select id="resumeGroup" class="form-select">
+        <option value="">All users</option>
+      </select>
+    </div>
+    <div class="flex gap-2 mt-4" style="justify-content:flex-end;">
+      <button class="btn btn-outline btn-sm" onclick="closeResumeModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitResumeModal()">Resume</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -51,11 +73,15 @@
 const STATUS_BADGE = {
   running:     'badge-info',
   stopping:    'badge-warning',
+  pausing:     'badge-warning',
+  paused:      'badge-warning',
   completed:   'badge-success',
   stopped:     'badge-warning',
   failed:      'badge-danger',
   interrupted: 'badge-danger',
 };
+const LIVE_STATUSES = ['running', 'stopping', 'pausing'];
+const RESUMABLE_STATUSES = ['paused', 'interrupted', 'stopped'];
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
@@ -67,13 +93,24 @@ const selectedIds = new Set();
 function row(c) {
   const pct = c.total ? Math.round((c.sent + c.failed) * 100 / c.total) : 0;
   const badge = STATUS_BADGE[c.status] || '';
-  const live = (c.status === 'running' || c.status === 'stopping');
-  let actions = '';
-  if (live) {
-    actions = `<button class="btn btn-danger btn-sm" onclick="stopCampaign('${c.id}')"
-                 ${c.stop_requested ? 'disabled' : ''}>Stop</button>`;
+  const live = LIVE_STATUSES.includes(c.status);
+  const resumable = RESUMABLE_STATUSES.includes(c.status);
+
+  let actions = `<a class="btn btn-outline btn-sm" href="/campaigns/${c.id}">View</a> `;
+  if (c.status === 'running') {
+    actions += `<button class="btn btn-outline btn-sm" onclick="pauseCampaign('${c.id}')">Pause</button>
+                 <button class="btn btn-danger btn-sm" onclick="stopCampaign('${c.id}')"
+                   ${c.stop_requested ? 'disabled' : ''}>Stop</button>`;
+  } else if (live) {
+    actions += `<span class="text-xs text-muted">${esc(c.status)}…</span>`;
+  } else if (resumable) {
+    actions += `<button class="btn btn-primary btn-sm" onclick="resumeCampaign('${c.id}', ${c.needs_resume_setup})">Resume</button>
+                 <form method="post" action="/campaigns/delete" style="display:inline;"
+                   onsubmit="return confirm('Delete this campaign record?');">
+                   <input type="hidden" name="id" value="${c.id}">
+                   <button class="btn btn-outline btn-sm" type="submit">Delete</button></form>`;
   } else {
-    actions = `<form method="post" action="/campaigns/delete" style="display:inline;"
+    actions += `<form method="post" action="/campaigns/delete" style="display:inline;"
                  onsubmit="return confirm('Delete this campaign record?');">
                  <input type="hidden" name="id" value="${c.id}">
                  <button class="btn btn-outline btn-sm" type="submit">Delete</button></form>`;
@@ -81,7 +118,7 @@ function row(c) {
   const err = c.last_error ? `<div class="text-xs" style="color:var(--danger);">${esc(c.last_error)}</div>` : '';
   const checked = selectedIds.has(String(c.id)) ? 'checked' : '';
   const checkbox = live
-    ? `<input type="checkbox" disabled title="Running campaigns can't be deleted">`
+    ? `<input type="checkbox" disabled title="Live campaigns can't be deleted">`
     : `<input type="checkbox" class="rowCheck" value="${c.id}" ${checked} onchange="onRowCheck(this)">`;
   return `<tr>
     <td>${checkbox}</td>
@@ -102,8 +139,8 @@ function row(c) {
 async function refresh() {
   try {
     const { campaigns } = await fetch('/api/campaign-status').then(r => r.json());
-    // Drop selections for campaigns that no longer exist or are now running.
-    const stillSelectable = new Set(campaigns.filter(c => c.status !== 'running' && c.status !== 'stopping').map(c => String(c.id)));
+    // Drop selections for campaigns that no longer exist or are now live.
+    const stillSelectable = new Set(campaigns.filter(c => !LIVE_STATUSES.includes(c.status)).map(c => String(c.id)));
     [...selectedIds].forEach(id => { if (!stillSelectable.has(id)) selectedIds.delete(id); });
 
     const body = campaigns.length
@@ -118,6 +155,48 @@ function stopCampaign(id) {
   if (!confirm('Stop this campaign? Already-sent emails cannot be recalled.')) return;
   const data = new URLSearchParams({ id });
   fetch('/campaigns/stop', { method: 'POST', body: data }).then(refresh);
+}
+
+function pauseCampaign(id) {
+  const data = new URLSearchParams({ id });
+  fetch('/campaigns/pause', { method: 'POST', body: data }).then(refresh);
+}
+
+let resumeTargetId = null;
+let groupsLoaded = false;
+
+async function resumeCampaign(id, needsSetup) {
+  if (!needsSetup) {
+    const data = new URLSearchParams({ id });
+    const res = await fetch('/campaigns/resume', { method: 'POST', body: data }).then(r => r.json());
+    if (res.status === 'error') alert(res.message);
+    refresh();
+    return;
+  }
+  resumeTargetId = id;
+  if (!groupsLoaded) {
+    try {
+      const { groups } = await fetch('/api/group-stats').then(r => r.json());
+      const sel = document.getElementById('resumeGroup');
+      groups.forEach(g => sel.innerHTML += `<option value="${esc(g)}">${esc(g)}</option>`);
+      groupsLoaded = true;
+    } catch (e) { /* fall back to "All users" only */ }
+  }
+  document.getElementById('resumeModal').style.display = 'flex';
+}
+
+function closeResumeModal() {
+  document.getElementById('resumeModal').style.display = 'none';
+  resumeTargetId = null;
+}
+
+async function submitResumeModal() {
+  const group = document.getElementById('resumeGroup').value;
+  const body = new URLSearchParams({ id: resumeTargetId, group, confirm_all: '1' });
+  const res = await fetch('/campaigns/resume', { method: 'POST', body }).then(r => r.json());
+  if (res.status === 'error') alert(res.message);
+  closeResumeModal();
+  refresh();
 }
 
 function onRowCheck(el) {

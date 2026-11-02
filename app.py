@@ -169,6 +169,33 @@ def init_db():
             """)
             cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS landing_page_id INTEGER")
             cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS landing_name TEXT NOT NULL DEFAULT ''")
+            # What was actually sent/targeted — stored at launch time so a campaign's
+            # detail page can show it after the fact, even once templates/users change.
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS template TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS link_text TEXT NOT NULL DEFAULT ''")
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS recipient_filter TEXT NOT NULL DEFAULT ''")
+            # Pause is cooperative like stop_requested, but resumable — kept as its
+            # own flag so the worker loop can tell which one tripped it.
+            cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS pause_requested BOOLEAN NOT NULL DEFAULT FALSE")
+            # Per-recipient send state for a campaign — a snapshot taken at launch time
+            # so pause/resume/restart-after-crash can pick up exactly where they left
+            # off instead of re-deriving (and potentially re-sending to) the group.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_recipients (
+                    id          SERIAL PRIMARY KEY,
+                    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                    username    TEXT NOT NULL DEFAULT '',
+                    first_name  TEXT NOT NULL DEFAULT '',
+                    last_name   TEXT NOT NULL DEFAULT '',
+                    email       TEXT NOT NULL DEFAULT '',
+                    token       TEXT NOT NULL DEFAULT '',
+                    track_open  TEXT NOT NULL DEFAULT 'no',
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    sent_at     TEXT NOT NULL DEFAULT '',
+                    error       TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_recipients_cid ON campaign_recipients(campaign_id, status)")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS landing_pages (
                     id         SERIAL PRIMARY KEY,
@@ -218,7 +245,7 @@ def init_db():
             # a worker thread does not survive a restart, so mark them interrupted.
             cur.execute("""
                 UPDATE campaigns SET status = 'interrupted', finished_at = %s
-                 WHERE status IN ('running', 'stopping')
+                 WHERE status IN ('running', 'stopping', 'pausing')
             """, (_utcnow(),))
             # The dashboard joins users to clicks/opens/submissions by token on
             # every load (and now on every poll) — these tables grow unbounded,
@@ -1007,6 +1034,11 @@ def _compute_dashboard_stats(show_scanner):
             cur.execute(f"SELECT COUNT(DISTINCT token) AS cnt FROM submissions {scanner_filter}")
             submissions_count = cur.fetchone()['cnt']
 
+            # Raw row count, shown alongside the distinct-victim count above since
+            # one victim can submit more than once and the two numbers legitimately differ.
+            cur.execute(f"SELECT COUNT(*) AS cnt FROM submissions {scanner_filter}")
+            submissions_total = cur.fetchone()['cnt']
+
             cur.execute("""
                 SELECT
                     (SELECT COUNT(*) FROM clicks      WHERE is_scanner) +
@@ -1024,6 +1056,7 @@ def _compute_dashboard_stats(show_scanner):
         'emails_opened': opens_count,
         'links_clicked': clicks_count,
         'submissions':   submissions_count,
+        'submissions_total': submissions_total,
         'bot_clicks':    bot_clicks_count,
         'email_pending': max(0, total_users - sent_count),
     }
@@ -1421,9 +1454,10 @@ def change_password():
     return jsonify({'status': 'success', 'message': 'Password changed'})
 
 
-@app.route('/report')
-@login_required
-def report():
+def _build_report():
+    """Per-user simulation status plus a client-presentable summary and
+    per-group breakdown. Shared by the /report page and its CSV export so
+    the two never drift apart."""
     scanner_filter = "" if _show_scanner_hits() else "WHERE is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1437,32 +1471,90 @@ def report():
             cur.execute("SELECT DISTINCT LOWER(email) AS email FROM email_log")
             sent_emails = {r['email'] for r in cur.fetchall()}
 
+            cur.execute("""
+                SELECT username, STRING_AGG(DISTINCT campaign, ', ' ORDER BY campaign) AS campaigns
+                FROM email_log WHERE campaign <> '' GROUP BY username
+            """)
+            campaigns_by_user = {r['username']: r['campaigns'] for r in cur.fetchall()}
+
             cur.execute(f"""
-                SELECT token,
-                       COUNT(*) AS total_clicks,
-                       STRING_AGG(DISTINCT ip, ', ') AS ips
+                SELECT token, COUNT(*) AS total_opens
+                FROM opens {scanner_filter} GROUP BY token
+            """)
+            open_agg = {r['token']: r['total_opens'] for r in cur.fetchall()}
+
+            cur.execute(f"""
+                SELECT token, COUNT(*) AS total_clicks, STRING_AGG(DISTINCT ip, ', ') AS ips,
+                       MAX(timestamp) AS last_click
                 FROM clicks {scanner_filter}
                 GROUP BY token
             """)
             click_agg = {r['token']: dict(r) for r in cur.fetchall()}
 
+            cur.execute(f"""
+                SELECT token, COUNT(*) AS total_submissions, MAX(timestamp) AS last_submit
+                FROM submissions {scanner_filter} GROUP BY token
+            """)
+            sub_agg = {r['token']: dict(r) for r in cur.fetchall()}
+
     enriched = []
     for u in all_users:
         token = u.get('token', '')
-        agg   = click_agg.get(token, {})
+        email = (u.get('email') or '').lower()
+        cl    = click_agg.get(token, {})
+        sb    = sub_agg.get(token, {})
+        last_activity = max(filter(None, [cl.get('last_click', ''), sb.get('last_submit', '')]), default='')
         enriched.append({
-            'username':     u.get('username', ''),
-            'first_name':   u.get('first_name', ''),
-            'last_name':    u.get('last_name', ''),
-            'email':        u.get('email', ''),
-            'token':        token,
-            'email_sent':   '✅' if u.get('email', '').lower() in sent_emails else '❌',
-            'link_clicked': '✅' if token in click_agg else '❌',
-            'total_clicks': agg.get('total_clicks', 0),
-            'ips':          agg.get('ips', ''),
+            'username':          u.get('username', ''),
+            'first_name':        u.get('first_name', ''),
+            'last_name':         u.get('last_name', ''),
+            'email':             u.get('email', ''),
+            'group':             u.get('group', ''),
+            'token':             token,
+            'email_sent':        email in sent_emails,
+            'opened':            token in open_agg,
+            'total_opens':       open_agg.get(token, 0),
+            'link_clicked':      token in click_agg,
+            'total_clicks':      cl.get('total_clicks', 0),
+            'ips':               cl.get('ips', '') or '',
+            'submitted':         token in sub_agg,
+            'total_submissions': sb.get('total_submissions', 0),
+            'campaigns':         campaigns_by_user.get(u.get('username', ''), ''),
+            'last_activity':     last_activity,
         })
 
-    return render_template("report.html", users=enriched)
+    total = len(enriched)
+    def pct(n):
+        return round(100 * n / total, 1) if total else 0
+    summary = {
+        'total':     total,
+        'sent':      sum(1 for u in enriched if u['email_sent']),
+        'opened':    sum(1 for u in enriched if u['opened']),
+        'clicked':   sum(1 for u in enriched if u['link_clicked']),
+        'submitted': sum(1 for u in enriched if u['submitted']),
+    }
+    for k in ('sent', 'opened', 'clicked', 'submitted'):
+        summary[f'pct_{k}'] = pct(summary[k])
+
+    groups = {}
+    for u in enriched:
+        g = u['group'] or '(no group)'
+        gs = groups.setdefault(g, {'group': g, 'total': 0, 'sent': 0, 'opened': 0, 'clicked': 0, 'submitted': 0})
+        gs['total']     += 1
+        gs['sent']      += 1 if u['email_sent']   else 0
+        gs['opened']    += 1 if u['opened']       else 0
+        gs['clicked']   += 1 if u['link_clicked'] else 0
+        gs['submitted'] += 1 if u['submitted']    else 0
+    group_breakdown = sorted(groups.values(), key=lambda g: g['group'])
+
+    return enriched, summary, group_breakdown
+
+
+@app.route('/report')
+@login_required
+def report():
+    enriched, summary, group_breakdown = _build_report()
+    return render_template("report.html", users=enriched, summary=summary, group_breakdown=group_breakdown)
 
 
 # ── Import ────────────────────────────────────────────────────────────────────
@@ -1821,18 +1913,29 @@ def _campaign_update(cid, **fields):
                         (*fields.values(), cid))
 
 
-def _campaign_stop_requested(cid):
+def _campaign_flags(cid):
+    """(stop_requested, pause_requested) for the worker loop's cooperative checks."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT stop_requested FROM campaigns WHERE id = %s", (cid,))
+            cur.execute("SELECT stop_requested, pause_requested FROM campaigns WHERE id = %s", (cid,))
             row = cur.fetchone()
-            return bool(row and row['stop_requested'])
+            return (bool(row and row['stop_requested']), bool(row and row['pause_requested']))
 
 
-def _run_campaign(cid, users, template, subject, link_text, cfg, delay, label, landing_id=None):
-    """Background worker: sends one campaign's emails, updating progress in the DB
-    and honouring a cooperative stop request. Runs in its own thread so several
-    campaigns can send at the same time."""
+def _mark_recipient(rid, status, error=''):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE campaign_recipients SET status = %s, sent_at = %s, error = %s WHERE id = %s
+            """, (status, _utcnow() if status == 'sent' else '', error, rid))
+
+
+def _run_campaign(cid, template, subject, link_text, cfg, delay, label, landing_id=None):
+    """Background worker: sends one campaign's still-pending recipients, updating
+    progress in the DB and honouring a cooperative stop/pause request. Recipients are
+    read from campaign_recipients — a snapshot taken at launch — rather than an
+    in-memory list, so pausing and resuming (even across a process restart) just means
+    calling this again for the same campaign id; it naturally picks up where it left off."""
     from_hdr = smtp_from_header(cfg)
     try:
         server = smtp_connection(cfg)
@@ -1842,24 +1945,40 @@ def _run_campaign(cid, users, template, subject, link_text, cfg, delay, label, l
         print(f"❌ Campaign {cid} failed to connect: {e}")
         return
 
-    sent = failed = 0
-    stopped = False
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sent, failed FROM campaigns WHERE id = %s", (cid,))
+            counts = cur.fetchone()
+            sent, failed = counts['sent'], counts['failed']
+
+            cur.execute("""
+                SELECT id, username, first_name, last_name, email, token, track_open
+                FROM campaign_recipients WHERE campaign_id = %s AND status = 'pending'
+                ORDER BY id
+            """, (cid,))
+            pending = [dict(r) for r in cur.fetchall()]
+
+    stopped = paused = False
     try:
-        for user in users:
-            if _campaign_stop_requested(cid):
+        for rec in pending:
+            stop_req, pause_req = _campaign_flags(cid)
+            if stop_req:
                 stopped = True
                 break
+            if pause_req:
+                paused = True
+                break
 
-            to_email   = user['email']
-            track_open = user.get('track_open') == 'yes'
-            link_url, pixel_url = tracking_urls(user['token'], label, landing_id)
+            to_email   = rec['email']
+            track_open = rec.get('track_open') == 'yes'
+            link_url, pixel_url = tracking_urls(rec['token'], label, landing_id)
             pixel_tag  = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
 
             body = template \
-                .replace("{{first_name}}", user['first_name']) \
-                .replace("{{last_name}}",  user['last_name']) \
-                .replace("{{email}}",      user['email']) \
-                .replace("{{token}}",      user['token']) \
+                .replace("{{first_name}}", rec['first_name']) \
+                .replace("{{last_name}}",  rec['last_name']) \
+                .replace("{{email}}",      rec['email']) \
+                .replace("{{token}}",      rec['token']) \
                 .replace("{{link}}",       f'<a href="{link_url}">{link_text}</a>') \
                 .replace("{{pixel}}",      pixel_tag if track_open else '')
             if track_open and pixel_url not in body:
@@ -1873,12 +1992,14 @@ def _run_campaign(cid, users, template, subject, link_text, cfg, delay, label, l
 
             try:
                 server.send_message(msg)
-                log_email_sent(user['username'], to_email, _utcnow(), label)
+                log_email_sent(rec['username'], to_email, _utcnow(), label)
                 sent += 1
+                _mark_recipient(rec['id'], 'sent')
                 _campaign_update(cid, sent=sent)
                 print(f"✅ [{label}] sent to {to_email}")
             except Exception as e:
                 failed += 1
+                _mark_recipient(rec['id'], 'failed', error=str(e))
                 _campaign_update(cid, failed=failed, last_error=str(e))
                 print(f"❌ [{label}] failed to {to_email}: {e}")
 
@@ -1889,8 +2010,11 @@ def _run_campaign(cid, users, template, subject, link_text, cfg, delay, label, l
         except Exception:
             pass
 
-    final = 'stopped' if stopped else 'completed'
-    _campaign_update(cid, status=final, sent=sent, failed=failed, finished_at=_utcnow())
+    final = 'paused' if paused else ('stopped' if stopped else 'completed')
+    fields = dict(status=final, sent=sent, failed=failed)
+    if final != 'paused':
+        fields['finished_at'] = _utcnow()
+    _campaign_update(cid, **fields)
     print(f"🏁 Campaign {cid} ({label}) {final}: {sent} sent, {failed} failed")
 
 
@@ -1953,21 +2077,35 @@ def send_emails():
     lp = get_landing_page(landing_id) if landing_id else None
     landing_name = lp['name'] if lp else ''
 
+    if select_all_group:
+        status_desc = {'sent': 'already sent', 'pending': 'not yet sent'}.get(status_filter, 'any status')
+        recipient_filter = f"Group: {group or 'all groups'} · {status_desc} · {len(users_to_send)} recipients"
+    else:
+        recipient_filter = f"{len(users_to_send)} manually selected user(s)"
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO campaigns
                     (name, smtp_config_id, smtp_name, subject, delay, total, status,
-                     created_at, landing_page_id, landing_name)
-                VALUES (%s,%s,%s,%s,%s,%s,'running',%s,%s,%s)
+                     created_at, landing_page_id, landing_name, template, link_text, recipient_filter)
+                VALUES (%s,%s,%s,%s,%s,%s,'running',%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (label, cfg['id'], cfg['name'], subject, delay,
-                  len(users_to_send), _utcnow(), landing_id, landing_name))
+                  len(users_to_send), _utcnow(), landing_id, landing_name,
+                  template, link_text, recipient_filter))
             cid = cur.fetchone()['id']
+
+            cur.executemany("""
+                INSERT INTO campaign_recipients
+                    (campaign_id, username, first_name, last_name, email, token, track_open, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')
+            """, [(cid, u['username'], u['first_name'], u['last_name'], u['email'],
+                   u['token'], u.get('track_open', 'no')) for u in users_to_send])
 
     thread = threading.Thread(
         target=_run_campaign,
-        args=(cid, users_to_send, template, subject, link_text, cfg, delay, label, landing_id),
+        args=(cid, template, subject, link_text, cfg, delay, label, landing_id),
         daemon=True,
     )
     thread.start()
@@ -1975,16 +2113,33 @@ def send_emails():
     return redirect(url_for('campaigns'))
 
 
+_PENDING_RECIPIENTS_JOIN = """
+    LEFT JOIN (
+        SELECT campaign_id, COUNT(*) AS pending_count FROM campaign_recipients
+        WHERE status = 'pending' GROUP BY campaign_id
+    ) pr ON pr.campaign_id = c.id
+"""
+
+
+def _with_resume_flag(row):
+    row = dict(row)
+    pending = row.pop('pending_count', 0) or 0
+    row['needs_resume_setup'] = row['status'] in ('paused', 'interrupted', 'stopped') and pending == 0
+    return row
+
+
 @app.route('/campaigns')
 @login_required
 def campaigns():
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT * FROM campaigns
-                ORDER BY (status = 'running') DESC, id DESC
+            cur.execute(f"""
+                SELECT c.*, COALESCE(pr.pending_count, 0) AS pending_count
+                FROM campaigns c
+                {_PENDING_RECIPIENTS_JOIN}
+                ORDER BY (c.status = 'running') DESC, c.id DESC
             """)
-            rows = [dict(r) for r in cur.fetchall()]
+            rows = [_with_resume_flag(r) for r in cur.fetchall()]
     return render_template("campaigns.html", campaigns=rows)
 
 
@@ -2008,11 +2163,16 @@ def api_campaign_detail(cid):
     scanner_clause = "" if _show_scanner_hits() else "AND is_scanner = FALSE"
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
+            cur.execute(f"""
+                SELECT c.*, COALESCE(pr.pending_count, 0) AS pending_count
+                FROM campaigns c
+                {_PENDING_RECIPIENTS_JOIN}
+                WHERE c.id = %s
+            """, (cid,))
             row = cur.fetchone()
             if not row:
                 return jsonify({'error': 'not found'}), 404
-            camp  = dict(row)
+            camp  = _with_resume_flag(row)
             label = camp['name']
 
             cur.execute("""
@@ -2066,6 +2226,7 @@ def api_campaign_detail(cid):
             'last_click':  cl.get('last_click', ''),
             'ips':         cl.get('ips', '') or '',
             'submitted':   bool(sb),
+            'submit_count': sb.get('subs', 0),
             'submit_time': sb.get('last_submit', ''),
         })
 
@@ -2075,6 +2236,7 @@ def api_campaign_detail(cid):
         'recipients': len(recipients),
         'opened':     sum(1 for r in recipients if r['opened']),
         'clicked':    sum(1 for r in recipients if r['clicks'] > 0),
+        'submissions_total': sum(r['submit_count'] for r in recipients),
         'submitted':  sum(1 for r in recipients if r['submitted']),
     }
     return jsonify({'campaign': camp, 'recipients': recipients, 'summary': summary})
@@ -2085,14 +2247,110 @@ def api_campaign_detail(cid):
 def api_campaign_status():
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, name, smtp_name, subject, delay, total, sent, failed,
-                       status, stop_requested, last_error, created_at, finished_at
-                FROM campaigns
-                ORDER BY (status = 'running') DESC, id DESC
+            cur.execute(f"""
+                SELECT c.id, c.name, c.smtp_name, c.subject, c.delay, c.total, c.sent, c.failed,
+                       c.status, c.stop_requested, c.pause_requested, c.last_error,
+                       c.created_at, c.finished_at, COALESCE(pr.pending_count, 0) AS pending_count
+                FROM campaigns c
+                {_PENDING_RECIPIENTS_JOIN}
+                ORDER BY (c.status = 'running') DESC, c.id DESC
             """)
-            rows = [dict(r) for r in cur.fetchall()]
+            rows = [_with_resume_flag(r) for r in cur.fetchall()]
     return jsonify({'campaigns': rows})
+
+
+@app.route('/campaigns/pause', methods=['POST'])
+@role_required('operator')
+def pause_campaign():
+    cid = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE campaigns SET pause_requested = TRUE, status = 'pausing'
+                 WHERE id = %s AND status = 'running'
+            """, (cid,))
+    return jsonify({'status': 'success'})
+
+
+@app.route('/campaigns/resume', methods=['POST'])
+@role_required('operator')
+def resume_campaign():
+    cid = request.form.get('id', '').strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s", (cid,))
+            row = cur.fetchone()
+    if not row or row['status'] not in ('paused', 'interrupted', 'stopped'):
+        return jsonify({'status': 'error', 'message': 'Campaign is not resumable.'}), 400
+    camp = dict(row)
+
+    if not camp.get('template'):
+        return jsonify({'status': 'error', 'message':
+            'This campaign predates message-content tracking, so its original email '
+            'body is unknown — resume is not available. Launch a new campaign instead; '
+            'selecting recipients by "not yet sent" status will skip anyone this one '
+            'already emailed.'}), 400
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) AS cnt FROM campaign_recipients
+                WHERE campaign_id = %s AND status = 'pending'
+            """, (cid,))
+            pending_count = cur.fetchone()['cnt']
+
+    if pending_count == 0:
+        # Best-effort fallback for a campaign that predates per-recipient tracking
+        # (or one whose original list is fully processed): re-derive candidates from
+        # a group chosen now, excluding anyone already emailed under this label.
+        group = request.form.get('group', '').strip()
+        if not group and request.form.get('confirm_all') != '1':
+            return jsonify({'status': 'needs_setup', 'message':
+                "This campaign's original recipient list can't be recovered — "
+                'choose a group (or confirm "all users") to resume into.'}), 409
+
+        all_users = load_users()
+        candidates = [u for u in all_users if not group or u['group'] == group]
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT LOWER(email) AS email FROM email_log WHERE campaign = %s",
+                            (camp['name'],))
+                already_sent = {r['email'] for r in cur.fetchall()}
+        candidates = [u for u in candidates if u['email'].strip().lower() not in already_sent]
+
+        if not candidates:
+            return jsonify({'status': 'error',
+                             'message': 'No matching, not-yet-emailed users found to resume into.'}), 400
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO campaign_recipients
+                        (campaign_id, username, first_name, last_name, email, token, track_open, status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')
+                """, [(cid, u['username'], u['first_name'], u['last_name'], u['email'],
+                       u['token'], u.get('track_open', 'no')) for u in candidates])
+                cur.execute("""
+                    UPDATE campaigns SET total = total + %s,
+                        recipient_filter = recipient_filter || %s
+                    WHERE id = %s
+                """, (len(candidates),
+                      f" · resumed into: {group or 'all groups'} ({len(candidates)})", cid))
+
+    cfg = get_smtp_config(camp['smtp_config_id'])
+    if not cfg:
+        return jsonify({'status': 'error',
+                         'message': 'Original SMTP config no longer exists — add one under SMTP, then retry.'}), 400
+
+    _campaign_update(cid, status='running', stop_requested=False, pause_requested=False, last_error='')
+    thread = threading.Thread(
+        target=_run_campaign,
+        args=(cid, camp['template'], camp['subject'], camp['link_text'] or 'Click here',
+              cfg, camp['delay'], camp['name'], camp['landing_page_id']),
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({'status': 'success'})
 
 
 @app.route('/campaigns/stop', methods=['POST'])
@@ -2103,8 +2361,13 @@ def stop_campaign():
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE campaigns SET stop_requested = TRUE, status = 'stopping'
-                 WHERE id = %s AND status = 'running'
+                 WHERE id = %s AND status IN ('running', 'pausing')
             """, (cid,))
+            # No live worker for these — stop can flip them straight to terminal.
+            cur.execute("""
+                UPDATE campaigns SET status = 'stopped', stop_requested = TRUE, finished_at = %s
+                 WHERE id = %s AND status IN ('paused', 'interrupted')
+            """, (_utcnow(), cid))
     return jsonify({'status': 'success'})
 
 
@@ -2115,7 +2378,7 @@ def delete_campaign():
     with get_db() as conn:
         with conn.cursor() as cur:
             # Don't delete a live job out from under its worker.
-            cur.execute("DELETE FROM campaigns WHERE id = %s AND status <> 'running'", (cid,))
+            cur.execute("DELETE FROM campaigns WHERE id = %s AND status NOT IN ('running', 'pausing')", (cid,))
     return redirect(url_for('campaigns'))
 
 
@@ -2134,7 +2397,7 @@ def bulk_delete_campaigns():
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                DELETE FROM campaigns WHERE id = ANY(%s) AND status <> 'running'
+                DELETE FROM campaigns WHERE id = ANY(%s) AND status NOT IN ('running', 'pausing')
                 RETURNING id
             """, (ids,))
             deleted_ids = [r['id'] for r in cur.fetchall()]
@@ -2183,6 +2446,73 @@ def export_csv():
 
     response = make_response(output.getvalue())
     response.headers["Content-Disposition"] = "attachment; filename=click_report.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+
+@app.route('/export/submissions.csv')
+@login_required
+def export_submissions_csv():
+    """One row per submission (not grouped by victim) so every entry a user
+    submitted is exported, not just their latest."""
+    scanner_clause = "" if _show_scanner_hits() else "WHERE s.is_scanner = FALSE"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT u.username, u.first_name, u.last_name, u.email AS victim_email,
+                       u.grp AS "group",
+                       s.name AS sub_name, s.email AS sub_email, s.phone, s.id_value,
+                       s.comment, s.campaign, lp.name AS landing_name, s.ip,
+                       s.timestamp::text AS timestamp, s.is_scanner, s.scanner_vendor
+                FROM submissions s
+                LEFT JOIN users u          ON u.token = s.token
+                LEFT JOIN landing_pages lp ON lp.id   = s.landing_id
+                {scanner_clause}
+                ORDER BY s.timestamp
+            """)
+            rows = cur.fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Username', 'First Name', 'Last Name', 'Victim Email', 'Group',
+                      'Submitted Name', 'Submitted Email', 'Phone', 'ID Value', 'Comment',
+                      'Campaign', 'Landing Page', 'IP Address', 'Timestamp',
+                      'Scanner Hit', 'Scanner Vendor'])
+    for r in rows:
+        writer.writerow([r['username'], r['first_name'], r['last_name'], r['victim_email'],
+                          r['group'], r['sub_name'], r['sub_email'], r['phone'], r['id_value'],
+                          r['comment'], r['campaign'], r['landing_name'], r['ip'], r['timestamp'],
+                          'yes' if r['is_scanner'] else 'no', r['scanner_vendor']])
+
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=submissions_report.csv"
+    response.headers["Content-type"] = "text/csv"
+    return response
+
+
+@app.route('/export/report.csv')
+@login_required
+def export_report_csv():
+    """Mirrors the enriched /report table exactly (same _build_report()), so
+    what's exported always matches what's on screen."""
+    enriched, _summary, _group_breakdown = _build_report()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Username', 'First Name', 'Last Name', 'Email', 'Group',
+                      'Email Sent', 'Opened', 'Total Opens', 'Clicked', 'Total Clicks',
+                      'IP Addresses', 'Submitted', 'Total Submissions', 'Campaigns',
+                      'Last Activity'])
+    for u in enriched:
+        writer.writerow([u['username'], u['first_name'], u['last_name'], u['email'], u['group'],
+                          'yes' if u['email_sent'] else 'no',
+                          'yes' if u['opened'] else 'no', u['total_opens'],
+                          'yes' if u['link_clicked'] else 'no', u['total_clicks'], u['ips'],
+                          'yes' if u['submitted'] else 'no', u['total_submissions'],
+                          u['campaigns'], u['last_activity']])
+
+    response = make_response(output.getvalue())
+    response.headers["Content-Disposition"] = "attachment; filename=report.csv"
     response.headers["Content-type"] = "text/csv"
     return response
 

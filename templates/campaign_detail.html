@@ -19,9 +19,7 @@
     </div>
     <div class="flex gap-2" style="align-items:center;">
       <span id="statusBadge" class="badge">{{ campaign.status }}</span>
-      {% if campaign.status in ('running', 'stopping') %}
-      <button class="btn btn-danger btn-sm" onclick="stopCampaign()">Stop</button>
-      {% endif %}
+      <div id="actionBtns" class="flex gap-2"></div>
     </div>
   </div>
 
@@ -39,6 +37,22 @@
     {% endif %}
   </div>
 
+  <!-- Message -->
+  <div class="card mb-4">
+    <div class="page-header flex-between mb-2">
+      <h1 style="font-size:1.1rem;">Message</h1>
+      <button class="btn btn-outline btn-sm" onclick="toggleSource()" id="sourceToggleBtn">View source</button>
+    </div>
+    <div class="grid-2 mb-3">
+      <div><span class="text-muted text-sm">Link Text</span><div>{{ campaign.link_text or '—' }}</div></div>
+      <div><span class="text-muted text-sm">Target Criteria</span><div>{{ campaign.recipient_filter or '— (unknown — launched before this was tracked)' }}</div></div>
+    </div>
+    <iframe id="templatePreview" sandbox=""
+      style="width:100%;height:320px;border:1px solid var(--border-color,#ddd);border-radius:6px;background:#fff;"></iframe>
+    <pre id="templateSource" class="text-xs"
+      style="display:none;white-space:pre-wrap;max-height:320px;overflow:auto;background:var(--bg-muted,#f4f4f5);padding:.75rem;border-radius:6px;"></pre>
+  </div>
+
   <!-- Progress + stats -->
   <div class="mb-2">
     <div class="progress" style="height:10px;"><div class="progress-bar" id="progBar" style="width:0%;"></div></div>
@@ -51,7 +65,7 @@
     <div class="stat-card"><div class="stat-icon">⚠️</div><div class="stat-value" id="s_failed">{{ campaign.failed }}</div><div class="stat-label">Failed</div></div>
     <div class="stat-card"><div class="stat-icon">👁️</div><div class="stat-value" id="s_opened">0</div><div class="stat-label">Opened</div></div>
     <div class="stat-card"><div class="stat-icon">🔗</div><div class="stat-value" id="s_clicked">0</div><div class="stat-label">Clicked</div></div>
-    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value" id="s_submitted">0</div><div class="stat-label">Submitted</div></div>
+    <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value" id="s_submitted">0</div><div class="stat-label">Submitted</div><div class="text-xs text-muted"><span id="s_submissions_total">0</span> total submissions</div></div>
   </div>
 
   <div class="page-header">
@@ -68,19 +82,72 @@
   </div>
 
 </div>
+
+<!-- Resume setup modal — only shown when the original recipient list can't be recovered -->
+<div class="modal-overlay" id="resumeModal" style="display:none;" onclick="if(event.target===this) closeResumeModal()">
+  <div class="modal-box">
+    <h3 style="margin-bottom:.5rem;">Resume Campaign</h3>
+    <p class="text-sm text-muted mb-3">
+      This campaign's original targeting criteria isn't on record. Pick a group to resume
+      into — anyone already emailed under this campaign is skipped automatically — or
+      resume into all users.
+    </p>
+    <div class="form-group">
+      <label class="form-label">Group</label>
+      <select id="resumeGroup" class="form-select">
+        <option value="">All users</option>
+      </select>
+    </div>
+    <div class="flex gap-2 mt-4" style="justify-content:flex-end;">
+      <button class="btn btn-outline btn-sm" onclick="closeResumeModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitResumeModal()">Resume</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
 <script>
 const CID = document.querySelector('[data-cid]').dataset.cid;
-const BADGE = { running:'badge-info', stopping:'badge-warning', completed:'badge-success',
+const BADGE = { running:'badge-info', stopping:'badge-warning', pausing:'badge-warning',
+                paused:'badge-warning', completed:'badge-success',
                 stopped:'badge-warning', failed:'badge-danger', interrupted:'badge-danger' };
+const LIVE_STATUSES = ['running', 'stopping', 'pausing'];
+const RESUMABLE_STATUSES = ['paused', 'interrupted', 'stopped'];
 let dt = null;
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 const yes = '<span class="badge badge-success">yes</span>';
 const no  = '<span class="text-muted">—</span>';
+
+const TEMPLATE_HTML = {{ campaign.template | tojson }};
+document.getElementById('templatePreview').srcdoc = TEMPLATE_HTML ||
+  '<p style="font-family:sans-serif;color:#888;padding:1rem;">No message content recorded for this campaign (it predates message tracking).</p>';
+document.getElementById('templateSource').textContent = TEMPLATE_HTML;
+
+function toggleSource() {
+  const pre = document.getElementById('templateSource');
+  const frame = document.getElementById('templatePreview');
+  const showingSource = pre.style.display !== 'none';
+  pre.style.display = showingSource ? 'none' : 'block';
+  frame.style.display = showingSource ? 'block' : 'none';
+  document.getElementById('sourceToggleBtn').textContent = showingSource ? 'View source' : 'View preview';
+}
+
+function renderActionBtns(c) {
+  const el = document.getElementById('actionBtns');
+  if (c.status === 'running') {
+    el.innerHTML = `<button class="btn btn-outline btn-sm" onclick="pauseCampaign()">Pause</button>
+                     <button class="btn btn-danger btn-sm" onclick="stopCampaign()" ${c.stop_requested ? 'disabled' : ''}>Stop</button>`;
+  } else if (LIVE_STATUSES.includes(c.status)) {
+    el.innerHTML = `<span class="text-xs text-muted">${esc(c.status)}…</span>`;
+  } else if (RESUMABLE_STATUSES.includes(c.status)) {
+    el.innerHTML = `<button class="btn btn-primary btn-sm" onclick="resumeCampaign(${!!c.needs_resume_setup})">Resume</button>`;
+  } else {
+    el.innerHTML = '';
+  }
+}
 
 async function refresh() {
   const data = await fetch('/api/campaign/' + CID).then(r => r.json());
@@ -90,6 +157,7 @@ async function refresh() {
   const badge = document.getElementById('statusBadge');
   badge.textContent = c.status;
   badge.className = 'badge ' + (BADGE[c.status] || '');
+  renderActionBtns(c);
 
   document.getElementById('s_total').textContent   = c.total;
   document.getElementById('s_sent').textContent    = c.sent;
@@ -97,6 +165,7 @@ async function refresh() {
   document.getElementById('s_opened').textContent  = s.opened;
   document.getElementById('s_clicked').textContent = s.clicked;
   document.getElementById('s_submitted').textContent = s.submitted;
+  document.getElementById('s_submissions_total').textContent = s.submissions_total;
   document.getElementById('m_finished').textContent = c.finished_at || '—';
 
   const done = c.sent + c.failed;
@@ -111,7 +180,7 @@ async function refresh() {
     <td class="text-xs">${esc(r.sent_time) || no}</td>
     <td>${r.opened ? yes + ' <span class="text-xs text-muted">' + esc(r.first_open) + '</span>' : no}</td>
     <td>${r.clicks > 0 ? '<strong>' + r.clicks + '</strong>' : no}</td>
-    <td>${r.submitted ? '<span class="badge badge-danger">yes</span> <span class="text-xs text-muted">' + esc(r.submit_time) + '</span>' : no}</td>
+    <td>${r.submitted ? '<span class="badge badge-danger">yes (' + r.submit_count + ')</span> <span class="text-xs text-muted">' + esc(r.submit_time) + '</span>' : no}</td>
     <td class="text-xs">${esc(r.last_click) || no}</td>
     <td class="text-xs">${esc(r.ips) || no}</td>
   </tr>`).join('');
@@ -123,15 +192,60 @@ async function refresh() {
     dt = $('#recipientTable').DataTable({ pageLength: 25, ordering: true, deferRender: true });
   }
 
-  // Stop polling once the campaign is finished.
-  if (!['running', 'stopping'].includes(c.status) && window._poll) {
+  // Stop polling once the campaign is no longer actively changing.
+  if (!LIVE_STATUSES.includes(c.status) && window._poll) {
     clearInterval(window._poll); window._poll = null;
   }
 }
 
 function stopCampaign() {
   if (!confirm('Stop this campaign? Already-sent emails cannot be recalled.')) return;
-  fetch('/campaigns/stop', { method:'POST', body: new URLSearchParams({ id: CID }) }).then(refresh);
+  fetch('/campaigns/stop', { method:'POST', body: new URLSearchParams({ id: CID }) }).then(() => {
+    if (!window._poll) window._poll = setInterval(refresh, 3000);
+    refresh();
+  });
+}
+
+function pauseCampaign() {
+  fetch('/campaigns/pause', { method:'POST', body: new URLSearchParams({ id: CID }) }).then(() => {
+    if (!window._poll) window._poll = setInterval(refresh, 3000);
+    refresh();
+  });
+}
+
+let groupsLoaded = false;
+
+async function resumeCampaign(needsSetup) {
+  if (!needsSetup) {
+    const res = await fetch('/campaigns/resume', { method:'POST', body: new URLSearchParams({ id: CID }) }).then(r => r.json());
+    if (res.status === 'error') alert(res.message);
+    if (!window._poll) window._poll = setInterval(refresh, 3000);
+    refresh();
+    return;
+  }
+  if (!groupsLoaded) {
+    try {
+      const { groups } = await fetch('/api/group-stats').then(r => r.json());
+      const sel = document.getElementById('resumeGroup');
+      groups.forEach(g => sel.innerHTML += `<option value="${esc(g)}">${esc(g)}</option>`);
+      groupsLoaded = true;
+    } catch (e) { /* fall back to "All users" only */ }
+  }
+  document.getElementById('resumeModal').style.display = 'flex';
+}
+
+function closeResumeModal() {
+  document.getElementById('resumeModal').style.display = 'none';
+}
+
+async function submitResumeModal() {
+  const group = document.getElementById('resumeGroup').value;
+  const body = new URLSearchParams({ id: CID, group, confirm_all: '1' });
+  const res = await fetch('/campaigns/resume', { method: 'POST', body }).then(r => r.json());
+  if (res.status === 'error') alert(res.message);
+  closeResumeModal();
+  if (!window._poll) window._poll = setInterval(refresh, 3000);
+  refresh();
 }
 
 refresh();
